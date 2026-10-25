@@ -1,6 +1,7 @@
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
+#undef I   // complex.h (through MetalFX) defines I; this file names tables I
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <ImageIO/ImageIO.h>
