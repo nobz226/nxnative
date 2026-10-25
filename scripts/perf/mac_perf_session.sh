@@ -12,22 +12,25 @@
 #   env.txt        the settings file the run used
 #   cpu-sample.txt with --sample: a 10 s CPU call-graph sample of the host, 60 s in
 #   gpu.trace      with --trace <s>: an Instruments Metal System Trace of <s> seconds, 90 s in (open it in Instruments)
+#   cpu.trace      with --profile <s>: an Instruments Time Profiler recording of every thread for <s> seconds, starting
+#                  when you press Return in this window (so you can start it right at the moment that is slow)
 #   summary.md     what mac_perf_summary.py makes of it all
 #
-# Usage: scripts/perf/mac_perf_session.sh [label] [--title <title ID>] [--sample] [--trace <seconds>]
+# Usage: scripts/perf/mac_perf_session.sh [label] [--title <title ID>] [--sample] [--trace <seconds>] [--profile <seconds>]
 #   label   a short name for the session, for example "docked-30-fxaa" (default: "session")
 #   --title the game's title ID (default: Breath of the Wild, 01007EF00011E000)
 # Needs: brew install macmon. The summary: python3 (any 3.x). --trace: Xcode.
 
 set -u
 HERE=${0:A:h}
-LABEL=session TITLE=01007EF00011E000 SAMPLE=0 TRACE=0
+LABEL=session TITLE=01007EF00011E000 SAMPLE=0 TRACE=0 PROFILE=0
 while (( $# )); do
   case $1 in
     --title) TITLE=$2; shift 2 ;;
     --sample) SAMPLE=1; shift ;;
     --trace) TRACE=$2; shift 2 ;;
-    -h|--help) sed -n '2,21p' $0; exit 0 ;;
+    --profile) PROFILE=$2; shift 2 ;;
+    -h|--help) sed -n '2,23p' $0; exit 0 ;;
     *) LABEL=$1; shift ;;
   esac
 done
@@ -75,6 +78,17 @@ if (( TRACE > 0 )); then
       --time-limit ${TRACE}s --output $OUT/gpu.trace >/dev/null 2>&1 ) &
 fi
 
+if (( PROFILE > 0 )); then
+  n=0
+  while kill -0 $PID 2>/dev/null; do
+    echo "press Return to record ${PROFILE} s of CPU profile (do the slow thing in the game right after)"
+    read -t 3600 || break
+    kill -0 $PID 2>/dev/null || break
+    n=$((n + 1)); echo "recording cpu-$n.trace ..."
+    xcrun xctrace record --template 'Time Profiler' --attach $PID --time-limit ${PROFILE}s --output $OUT/cpu-$n.trace >/dev/null 2>&1
+    echo "done: cpu-$n.trace"
+  done
+fi
 while kill -0 $PID 2>/dev/null; do sleep 2; done
 echo "the game quit"
 stop
