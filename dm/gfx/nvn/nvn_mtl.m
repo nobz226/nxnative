@@ -2561,10 +2561,85 @@ static int g_nbcrt; static void bcrt_flush(void);   // shadows of block-compress
 // "PC lite", as the present's DM_FXAA). The HUD and text drawn afterwards stay sharp. One copy and one full-screen pass a frame, at the attachment's size
 static char g_fx_key[24]; static size_t g_fx_keylen; static int g_fx_on = -1, g_fx_hit; static id<MTLTexture> g_fx_att;
 static id<MTLTexture> g_fx_tmp; static id<MTLRenderPipelineState> g_fx_pso; static MTLPixelFormat g_fx_fmt; static id<MTL4ArgumentTable> g_fx_args; static id<MTLSamplerState> g_fx_samp;
+// DM_AA=smaa or fxaa with DM_AA_KEY=<fragment shader key> picks the method (SMAA 1x: three full-screen passes, sharper than FXAA); DM_FXAA_SCENE=<key> is FXAA. g_fx_on: 1 FXAA, 2 SMAA
 static int fx_on(void) {
-    if (g_fx_on < 0) { const char *e = getenv("DM_FXAA_SCENE"); g_fx_on = e && *e && strcmp(e, "0");
-        if (g_fx_on) { strlcpy(g_fx_key, e, sizeof g_fx_key); g_fx_keylen = strlen(g_fx_key); MLOG("FXAA on the 3D picture after passes drawn with fragment shader %s (DM_FXAA_SCENE)", g_fx_key); } }
+    if (g_fx_on < 0) { const char *aa = getenv("DM_AA"), *k = getenv("DM_AA_KEY"), *e = getenv("DM_FXAA_SCENE"); g_fx_on = 0;
+        if (aa && k && *k && (!strcmp(aa, "smaa") || !strcmp(aa, "fxaa"))) { g_fx_on = !strcmp(aa, "smaa") ? 2 : 1; e = k; }
+        else if (aa && strcmp(aa, "off")) MLOG("[RED] DM_AA=%s: needs DM_AA=smaa or fxaa and DM_AA_KEY=<fragment shader key>; off", aa);
+        else if (e && *e && strcmp(e, "0")) g_fx_on = 1;
+        if (g_fx_on) { strlcpy(g_fx_key, e, sizeof g_fx_key); g_fx_keylen = strlen(g_fx_key); MLOG("%s on the 3D picture after passes drawn with fragment shader %s (%s)", g_fx_on == 2 ? "SMAA" : "FXAA", g_fx_key, aa ? "DM_AA" : "DM_FXAA_SCENE"); } }
     return g_fx_on;
+}
+#include "smaa_msl.h"
+#include "../../third_party/smaa/AreaTex.h"
+#include "../../third_party/smaa/SearchTex.h"
+static id<MTLRenderPipelineState> g_sm_pso[3]; static MTLPixelFormat g_sm_fmt; static id<MTLTexture> g_sm_edges, g_sm_blend, g_sm_area, g_sm_search;
+static id<MTL4ArgumentTable> g_sm_args[3]; static id<MTLSamplerState> g_sm_lin, g_sm_pt; static id<MTLBuffer> g_sm_par;
+static id<MTLTexture> sm_tex(MTLPixelFormat pf, NSUInteger w, NSUInteger h, id<MTLTexture> old) {
+    if (old && old.width == w && old.height == h && old.pixelFormat == pf) return old;
+    if (old) defer_obj_unref(old);
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
+    d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> t = [g_dev newTextureWithDescriptor:d]; if (t) res_add(t); return t;
+}
+static void sm_pass(id<MTLTexture> dst, MTLLoadAction la, id<MTLRenderPipelineState> pso, id<MTL4ArgumentTable> at) {
+    MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
+    rp.colorAttachments[0].texture = dst; rp.colorAttachments[0].loadAction = la; rp.colorAttachments[0].storeAction = MTLStoreActionStore; rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+    id<MTL4RenderCommandEncoder> en = [(id<MTL4CommandBuffer>)g_cb renderCommandEncoderWithDescriptor:rp];
+    if (!en) { RED_ONCE(175, "SMAA: render encoder failed"); return; }
+    [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+    [en setArgumentTable:at atStages:MTLRenderStageFragment];
+    [en setViewport:(MTLViewport){0, 0, (double)dst.width, (double)dst.height, 0, 1}]; [en setRenderPipelineState:pso];
+    [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    m4_end(en);
+}
+// SMAA 1x on the attachment (its copy is in g_fx_tmp): edges into an RG8 texture, blend weights into an RGBA8 one, then the blended image back into the attachment
+static void smaa_apply(id<MTLTexture> att) {
+    NSUInteger w = att.width, h = att.height;
+    if (!g_sm_pso[0] || g_sm_fmt != att.pixelFormat) {
+        NSError *err = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(smaa_msl) options:nil error:&err];
+        if (!lib) { MLOG("[RED] SMAA: shader compile failed: %s; off", err.localizedDescription.UTF8String); g_fx_on = 0; return; }
+        static NSString *const fn[3] = { @"fs_edges", @"fs_weights", @"fs_blend" };
+        MTLPixelFormat out[3] = { MTLPixelFormatRG8Unorm, MTLPixelFormatRGBA8Unorm, att.pixelFormat };
+        for (int i = 0; i < 3; i++) { MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+            pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:fn[i]]; pd.colorAttachments[0].pixelFormat = out[i];
+            g_sm_pso[i] = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
+            if (!g_sm_pso[i]) { MLOG("[RED] SMAA: pipeline %s failed: %s; off", fn[i].UTF8String, err.localizedDescription.UTF8String); g_fx_on = 0; return; } }
+        g_sm_fmt = att.pixelFormat;
+    }
+    if (!g_sm_area) {   // the lookup tables, uploaded once
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG8Unorm width:AREATEX_WIDTH height:AREATEX_HEIGHT mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModeShared;
+        g_sm_area = [g_dev newTextureWithDescriptor:d];
+        [g_sm_area replaceRegion:MTLRegionMake2D(0, 0, AREATEX_WIDTH, AREATEX_HEIGHT) mipmapLevel:0 withBytes:areaTexBytes bytesPerRow:AREATEX_PITCH];
+        d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm width:SEARCHTEX_WIDTH height:SEARCHTEX_HEIGHT mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModeShared;
+        g_sm_search = [g_dev newTextureWithDescriptor:d];
+        [g_sm_search replaceRegion:MTLRegionMake2D(0, 0, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT) mipmapLevel:0 withBytes:searchTexBytes bytesPerRow:SEARCHTEX_PITCH];
+        res_add(g_sm_area); res_add(g_sm_search);
+        MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
+        g_sm_lin = [g_dev newSamplerStateWithDescriptor:sd];
+        sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterNearest; g_sm_pt = [g_dev newSamplerStateWithDescriptor:sd];
+        NSError *err = nil; MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 3; ad.maxSamplerStateBindCount = 2; ad.maxBufferBindCount = 1;
+        for (int i = 0; i < 3; i++) g_sm_args[i] = [g_dev newArgumentTableWithDescriptor:ad error:&err];
+        g_sm_par = [g_dev newBufferWithLength:32 options:MTLResourceStorageModeShared]; res_add(g_sm_par);
+        if (!g_sm_area || !g_sm_search || !g_sm_lin || !g_sm_pt || !g_sm_args[0] || !g_sm_args[1] || !g_sm_args[2] || !g_sm_par) { MLOG("[RED] SMAA: resources failed; off"); g_fx_on = 0; return; }
+    }
+    g_sm_edges = sm_tex(MTLPixelFormatRG8Unorm, w, h, g_sm_edges); g_sm_blend = sm_tex(MTLPixelFormatRGBA8Unorm, w, h, g_sm_blend);
+    if (!g_sm_edges || !g_sm_blend) return;
+    MTLPixelFormat pf = att.pixelFormat;
+    uint32_t srgb = pf == MTLPixelFormatRGBA8Unorm_sRGB || pf == MTLPixelFormatBGRA8Unorm_sRGB;
+    float *par = g_sm_par.contents; par[0] = 1.0f / w; par[1] = 1.0f / h; par[2] = (float)w; par[3] = (float)h; memcpy(par + 4, &srgb, 4);
+    id<MTL4ArgumentTable> a = g_sm_args[0];
+    [a setTexture:g_fx_tmp.gpuResourceID atIndex:0]; [a setSamplerState:g_sm_lin.gpuResourceID atIndex:0]; [a setAddress:g_sm_par.gpuAddress atIndex:0];
+    sm_pass(g_sm_edges, MTLLoadActionClear, g_sm_pso[0], a);
+    a = g_sm_args[1];
+    [a setTexture:g_sm_edges.gpuResourceID atIndex:0]; [a setTexture:g_sm_area.gpuResourceID atIndex:1]; [a setTexture:g_sm_search.gpuResourceID atIndex:2];
+    [a setSamplerState:g_sm_lin.gpuResourceID atIndex:0]; [a setSamplerState:g_sm_pt.gpuResourceID atIndex:1]; [a setAddress:g_sm_par.gpuAddress atIndex:0];
+    sm_pass(g_sm_blend, MTLLoadActionClear, g_sm_pso[1], a);
+    a = g_sm_args[2];
+    [a setTexture:g_fx_tmp.gpuResourceID atIndex:0]; [a setTexture:g_sm_blend.gpuResourceID atIndex:1]; [a setSamplerState:g_sm_lin.gpuResourceID atIndex:0]; [a setAddress:g_sm_par.gpuAddress atIndex:0];
+    sm_pass(att, MTLLoadActionDontCare, g_sm_pso[2], a);
 }
 static void fx_apply(id<MTLTexture> att) {
     if (att.textureType != MTLTextureType2D || att.sampleCount != 1) { RED_ONCE(170, "DM_FXAA_SCENE: the pass's color attachment is not a plain 2D texture; FXAA skipped"); return; }
@@ -2618,6 +2693,7 @@ static void fx_apply(id<MTLTexture> att) {
     id<MTL4ComputeCommandEncoder> b = blit();
     enc_b_copy_texture(b, att, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), g_fx_tmp, 0, 0, MTLOriginMake(0, 0, 0));
     enc_b_end(g_blit); g_blit = nil;
+    if (g_fx_on == 2) { smaa_apply(att); args_dirty_all(); return; }
     MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
     rp.colorAttachments[0].texture = att; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTL4RenderCommandEncoder> en = [(id<MTL4CommandBuffer>)g_cb renderCommandEncoderWithDescriptor:rp];
