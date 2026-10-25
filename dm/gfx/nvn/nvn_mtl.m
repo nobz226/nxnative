@@ -1,5 +1,6 @@
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <ImageIO/ImageIO.h>
@@ -6817,10 +6818,63 @@ static id<MTLTexture> fb_snap_tex(MTLPixelFormat pf, NSUInteger w, NSUInteger h)
     if (pool[next]) defer_obj_release(pool[next]); pool[next] = t; next = (next + 1) & 3;
     return t;
 }
+// DM_UPSCALE=metalfx with DM_UPSCALE_KEY=<fragment shader key>: MetalFX spatial upscaling of the 3D image. Before a draw with that fragment shader (the game's tone mapping:
+// it samples the 3D image, smaller than its target when the game renders below the output size, and stretches it), the largest sampled texture smaller than the pass's first
+// color attachment is upscaled to the attachment's size by MetalFX, and the draw samples the result instead (through fb_prepare's substitution). Breath of the Wild docked: the
+// 1600x900 3D image to the 1920x1080 composite. A float image is upscaled in MetalFX's HDR mode. Assumes the shader samples with normalized coordinates (a full-screen stretch)
+static int g_up_on = -1; static char g_up_key[24]; static size_t g_up_keylen;
+static id<MTL4FXSpatialScaler> g_up_scaler; static id<MTLTexture> g_up_out; static MTLPixelFormat g_up_fmt; static NSUInteger g_up_iw, g_up_ih, g_up_ow, g_up_oh; static uint64_t g_up_n;
+static int up_on(void) {
+    if (g_up_on < 0) { const char *e = getenv("DM_UPSCALE"), *k = getenv("DM_UPSCALE_KEY");
+        g_up_on = e && !strcmp(e, "metalfx") && k && *k;
+        if (g_up_on && ![MTLFXSpatialScalerDescriptor supportsDevice:g_dev]) { MLOG("[RED] DM_UPSCALE=metalfx: MetalFX spatial scaling is not supported on this device"); g_up_on = 0; }
+        if (g_up_on) { strlcpy(g_up_key, k, sizeof g_up_key); g_up_keylen = strlen(g_up_key); MLOG("MetalFX spatial upscaling of the image sampled by fragment shader %s (DM_UPSCALE)", g_up_key); }
+        else if (e) MLOG("[RED] DM_UPSCALE=%s: needs DM_UPSCALE=metalfx and DM_UPSCALE_KEY=<fragment shader key>; off", e); }
+    return g_up_on;
+}
+static void up_prepare(NvProg *pr) {
+    NvShader *fs = pr->sh[1]; tex_t *rt = R.rt.color[0]; if (!rt) return;
+    NSUInteger ow = rt->d.width, oh = rt->d.height;
+    id<MTLTexture> src = nil;
+    for (int i = 0; i < fs->rf.nb; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= 128) continue;
+        int tid = (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff); if (!tid) continue;
+        os_unfair_lock_lock(&g_rmu); void *tv = NULL; tex_fast_rid(tid, &tv); id<MTLTexture> t = (__bridge id<MTLTexture>)tv; os_unfair_lock_unlock(&g_rmu);
+        if (!t || t.textureType != MTLTextureType2D || t.sampleCount != 1 || t.width >= ow || t.height >= oh) continue;   // not smaller than the output: nothing to upscale
+        if (!src || t.width * t.height > src.width * src.height) src = t;   // the 3D image, not the small bloom levels
+    }
+    if (!src) return;
+    NSUInteger iw = src.width, ih = src.height; MTLPixelFormat pf = src.pixelFormat;
+    if (!g_up_scaler || g_up_fmt != pf || g_up_iw != iw || g_up_ih != ih || g_up_ow != ow || g_up_oh != oh) {
+        MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
+        d.inputWidth = iw; d.inputHeight = ih; d.outputWidth = ow; d.outputHeight = oh; d.colorTextureFormat = pf; d.outputTextureFormat = pf;
+        int fl = pf == MTLPixelFormatRGBA16Float || pf == MTLPixelFormatRG11B10Float || pf == MTLPixelFormatRGB9E5Float || pf == MTLPixelFormatRGBA32Float;
+        d.colorProcessingMode = fl ? MTLFXSpatialScalerColorProcessingModeHDR : MTLFXSpatialScalerColorProcessingModePerceptual;
+        static id<MTL4Compiler> comp; if (!comp) { NSError *ce = nil; comp = g_comp4 ?: [g_dev newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&ce]; }
+        g_up_scaler = comp ? [d newSpatialScalerWithDevice:g_dev compiler:comp] : nil;
+        if (!g_up_scaler) { MLOG("[RED] DM_UPSCALE=metalfx: cannot make a MetalFX spatial scaler %lux%lu → %lux%lu (format %lu); off", (unsigned long)iw, (unsigned long)ih, (unsigned long)ow, (unsigned long)oh, (unsigned long)pf); g_up_on = 0; return; }
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:ow height:oh mipmapped:NO];
+        td.usage = g_up_scaler.outputTextureUsage | MTLTextureUsageShaderRead; td.storageMode = MTLStorageModePrivate;
+        if (g_up_out) defer_obj_unref(g_up_out);
+        g_up_out = [g_dev newTextureWithDescriptor:td]; if (!g_up_out) { g_up_on = 0; return; }
+        res_add(g_up_out);
+        g_up_fmt = pf; g_up_iw = iw; g_up_ih = ih; g_up_ow = ow; g_up_oh = oh;
+        MLOG("MetalFX spatial upscaling: %lux%lu → %lux%lu, format %lu, %s mode", (unsigned long)iw, (unsigned long)ih, (unsigned long)ow, (unsigned long)oh, (unsigned long)pf, fl ? "HDR" : "perceptual");
+    }
+    if (g_enc) rp_end();
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    g_up_scaler.colorTexture = src; g_up_scaler.outputTexture = g_up_out; g_up_scaler.inputContentWidth = iw; g_up_scaler.inputContentHeight = ih;
+    [g_up_scaler encodeToCommandBuffer:(id<MTL4CommandBuffer>)g_cb];
+    g_last_end_relaxed = 0;   // the next pass begins with a full barrier, after the upscale
+    if (g_fb_n < 4) { if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != g_up_out) defer_obj_unref(g_fb_use[g_fb_n]);
+        g_fb_src[g_fb_n] = src; g_fb_use[g_fb_n] = g_up_out; g_fb_rid[g_fb_n] = g_up_out.gpuResourceID._impl; g_fb_n++;
+        g_fb_seq = g_draw_seq; args_dirty_all(); g_fb_rebind = 1; }
+    g_up_n++;
+}
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot and register the substitution (used by this draw's argument encoding)
 static void fb_prepare(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
+    if (up_on() && pr && pr->sh[1] && R.rt.n && !g_fz.active && !g_defer_replaying && !strncmp(pr->sh[1]->key, g_up_key, g_up_keylen)) up_prepare(pr);
     if (!pr || !pr->sh[1] || !R.rt.n || g_fz.active || g_defer_replaying || !fb_want(pr->sh[1]->key)) return;
     NvShader *fs = pr->sh[1];
     for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= 128) continue;
