@@ -1340,7 +1340,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[113];
+static int g_red_once[176];   // ids up to 175 (170-174: DM_FXAA_SCENE)
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -2554,6 +2554,80 @@ static void defer_fallback(void);
 static int g_el_w, g_el_h, g_el_draws; static char g_el_key[12];
 static int enc_label_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ENC_LABEL"); v = e && atoi(e); } return v; }
 static int g_nbcrt; static void bcrt_flush(void);   // shadows of block-compressed render targets used by the open pass (see bcrt_attach)
+// DM_FXAA_SCENE=<fragment shader key>: FXAA on the 3D picture only. When a render pass that drew with that fragment shader ends (the game's tone mapping, which writes the finished
+// 3D image before the HUD is drawn over it; Breath of the Wild: f7ee6fe10b925543), its first color attachment is copied aside and drawn back through FXAA (Lottes' FXAA 3.11
+// "PC lite", as the present's DM_FXAA). The HUD and text drawn afterwards stay sharp. One copy and one full-screen pass a frame, at the attachment's size
+static char g_fx_key[24]; static size_t g_fx_keylen; static int g_fx_on = -1, g_fx_hit; static id<MTLTexture> g_fx_att;
+static id<MTLTexture> g_fx_tmp; static id<MTLRenderPipelineState> g_fx_pso; static MTLPixelFormat g_fx_fmt; static id<MTL4ArgumentTable> g_fx_args; static id<MTLSamplerState> g_fx_samp;
+static int fx_on(void) {
+    if (g_fx_on < 0) { const char *e = getenv("DM_FXAA_SCENE"); g_fx_on = e && *e && strcmp(e, "0");
+        if (g_fx_on) { strlcpy(g_fx_key, e, sizeof g_fx_key); g_fx_keylen = strlen(g_fx_key); MLOG("FXAA on the 3D picture after passes drawn with fragment shader %s (DM_FXAA_SCENE)", g_fx_key); } }
+    return g_fx_on;
+}
+static void fx_apply(id<MTLTexture> att) {
+    if (att.textureType != MTLTextureType2D || att.sampleCount != 1) { RED_ONCE(170, "DM_FXAA_SCENE: the pass's color attachment is not a plain 2D texture; FXAA skipped"); return; }
+    NSUInteger w = att.width, h = att.height;
+    if (!g_fx_tmp || g_fx_tmp.width != w || g_fx_tmp.height != h || g_fx_tmp.pixelFormat != att.pixelFormat) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:att.pixelFormat width:w height:h mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
+        if (g_fx_tmp) defer_obj_unref(g_fx_tmp);
+        g_fx_tmp = [g_dev newTextureWithDescriptor:d]; if (!g_fx_tmp) return;
+        res_add(g_fx_tmp);
+        MLOG("DM_FXAA_SCENE: FXAA on a %lux%lu image (format %lu)", (unsigned long)w, (unsigned long)h, (unsigned long)att.pixelFormat);
+    }
+    if (!g_fx_pso || g_fx_fmt != att.pixelFormat) {
+        static const char *msl =
+            "#include <metal_stdlib>\nusing namespace metal;\n"
+            "struct V { float4 p [[position]]; float2 uv; };\n"
+            "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
+            "static float3 tap(texture2d<float> t, sampler s, float2 p, float4 e) { return t.sample(s, clamp(p, e.xy, e.zw)).rgb; }\n"
+            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+            "  float2 px = 1.0 / float2(t.get_width(), t.get_height()); float4 e = float4(0.5 * px, 1.0 - 0.5 * px); float2 uv = clamp(in.uv, e.xy, e.zw);\n"
+            "  float4 m = t.sample(s, uv); const float3 L = float3(0.299, 0.587, 0.114);\n"
+            "  float nw = dot(tap(t, s, uv + float2(-1, -1) * px, e), L), ne = dot(tap(t, s, uv + float2(1, -1) * px, e), L);\n"
+            "  float sw = dot(tap(t, s, uv + float2(-1, 1) * px, e), L), se = dot(tap(t, s, uv + float2(1, 1) * px, e), L), lm = dot(m.rgb, L);\n"
+            "  float lo = min(lm, min(min(nw, ne), min(sw, se))), hi = max(lm, max(max(nw, ne), max(sw, se)));\n"
+            "  float2 dir = float2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));\n"
+            "  float reduce = max((nw + ne + sw + se) * (0.25 / 8.0), 1.0 / 128.0);\n"
+            "  dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8.0, 8.0) * px;\n"
+            "  float3 a = 0.5 * (tap(t, s, uv + dir * (1.0 / 3.0 - 0.5), e) + tap(t, s, uv + dir * (2.0 / 3.0 - 0.5), e));\n"
+            "  float3 b = a * 0.5 + 0.25 * (tap(t, s, uv - dir * 0.5, e) + tap(t, s, uv + dir * 0.5, e));\n"
+            "  float lb = dot(b, L);\n"
+            "  return float4(lb < lo || lb > hi ? a : b, m.a);\n"
+            "}\n";
+        NSError *err = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(msl) options:nil error:&err];
+        if (!lib) { RED_ONCE(171, "DM_FXAA_SCENE: shader compile failed: %s", err.localizedDescription.UTF8String); g_fx_on = 0; return; }
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
+        pd.colorAttachments[0].pixelFormat = att.pixelFormat;
+        g_fx_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        if (!g_fx_pso) { RED_ONCE(172, "DM_FXAA_SCENE: pipeline failed: %s", err.localizedDescription.UTF8String); g_fx_on = 0; return; }
+        g_fx_fmt = att.pixelFormat;
+    }
+    if (!g_fx_args) {
+        NSError *err = nil; MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 1; ad.maxSamplerStateBindCount = 1;
+        g_fx_args = [g_dev newArgumentTableWithDescriptor:ad error:&err];
+        MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.supportArgumentBuffers = YES;
+        g_fx_samp = [g_dev newSamplerStateWithDescriptor:sd];
+        if (!g_fx_args || !g_fx_samp) { RED_ONCE(173, "DM_FXAA_SCENE: argument table or sampler failed"); g_fx_on = 0; return; }
+    }
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    id<MTL4ComputeCommandEncoder> b = blit();
+    enc_b_copy_texture(b, att, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), g_fx_tmp, 0, 0, MTLOriginMake(0, 0, 0));
+    enc_b_end(g_blit); g_blit = nil;
+    MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
+    rp.colorAttachments[0].texture = att; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTL4RenderCommandEncoder> en = [(id<MTL4CommandBuffer>)g_cb renderCommandEncoderWithDescriptor:rp];
+    if (!en) { RED_ONCE(174, "DM_FXAA_SCENE: render encoder failed"); return; }
+    [en barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+    [en setArgumentTable:g_fx_args atStages:MTLRenderStageFragment];
+    [g_fx_args setTexture:g_fx_tmp.gpuResourceID atIndex:0]; [g_fx_args setSamplerState:g_fx_samp.gpuResourceID atIndex:0];
+    [en setViewport:(MTLViewport){0, 0, (double)w, (double)h, 0, 1}]; [en setRenderPipelineState:g_fx_pso];
+    [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    m4_end(en);
+    args_dirty_all();
+}
 static void rp_end(void) { if (g_enc) { AP_B;
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
@@ -2566,6 +2640,8 @@ static void rp_end(void) { if (g_enc) { AP_B;
 #ifdef NVN_RT_RANGE_TEST
     rr_finish(ranged);
 #endif
+    if (g_fx_hit && g_fx_att) fx_apply(g_fx_att);
+    g_fx_hit = 0; g_fx_att = nil;
     AP_E(0);
 } }
 void pg_sub_begin_ext(uint64_t fence) { pg_sub_begin(fence); }
@@ -2881,6 +2957,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     args_dirty_all();
     g_stat_pass++;
     if (enc_label_on()) { id<MTLTexture> lt = pd.colorAttachments[0].texture ?: pd.depthAttachment.texture ?: pd.stencilAttachment.texture; g_el_w = (int)lt.width; g_el_h = (int)lt.height; g_el_draws = 0; g_el_key[0] = 0; }
+    if (fx_on()) { g_fx_att = pd.colorAttachments[0].texture; g_fx_hit = 0; }
     return g_enc;
 }
 // Empty-scissor precheck before opening a pass: the size of the selected level of the first valid target is an upper bound on the minimum bounds of the actual pass.
@@ -7387,6 +7464,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     }
     g_stat_draw++;
     if (enc_label_on() && !g_el_draws++ && pr->sh[1]) { memcpy(g_el_key, pr->sh[1]->key, 8); g_el_key[8] = 0; }
+    if (g_fx_on > 0 && pr->sh[1] && !strncmp(pr->sh[1]->key, g_fx_key, g_fx_keylen)) g_fx_hit = 1;
     if (passdump()) {   // Characteristics of a render pass's first draw (to judge whether the load can be omitted: full screen, no blending, writes all channels, does not depend on depth); with DM_NVN_PASSDUMP_ALL every draw is recorded
         static uint64_t last_pass = ~0ull; static int all = -1; if (all < 0) all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
         if (all || g_kd_force) PD("d %llu bv=%d bi=%d first=%d vs=%s fs=%s vc=%d inst=%d blend=%#x b0=%#llx dt=%d dw=%d df=%d cull=%d st=%d sf=%d,%d sop=%d,%d,%d/%d,%d,%d smask=%#x,%#x/%#x,%#x sref=%#x,%#x ib=%#llx it=%d cmask=%#x b1=%#llx b2=%#llx b3=%#llx po=%d/%g,%g,%g dc=%d", g_stat_pass, di ? di->base_vertex : 0, di ? di->base_instance : 0, dw ? dw->first : 0, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-",
