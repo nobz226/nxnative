@@ -8584,12 +8584,31 @@ static void present_pipeline(MTLPixelFormat format) {
             "struct V { float4 p [[position]]; float2 uv; };\n"
             "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
             "struct Crop { float4 rect; float4 edge; };\n"
-            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n";
+            "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) { return t.sample(s, clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw)); }\n"
+            // DM_FXAA=1: FXAA (Lottes' FXAA 3.11 "PC lite" variant) on the game picture at its own texel size, then the same scaling as fs. Five taps for the
+            // edge direction, four along it; the luma range check falls back to the narrower blend where the wider one crosses an edge
+            "static float3 tap(texture2d<float> t, sampler s, float2 p, float4 e) { return t.sample(s, clamp(p, e.xy, e.zw)).rgb; }\n"
+            "fragment float4 fs_fxaa(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {\n"
+            "  float2 uv = clamp(in.uv * c.rect.zw + c.rect.xy, c.edge.xy, c.edge.zw), px = 1.0 / float2(t.get_width(), t.get_height());\n"
+            "  float4 m = t.sample(s, uv); const float3 L = float3(0.299, 0.587, 0.114);\n"
+            "  float nw = dot(tap(t, s, uv + float2(-1, -1) * px, c.edge), L), ne = dot(tap(t, s, uv + float2(1, -1) * px, c.edge), L);\n"
+            "  float sw = dot(tap(t, s, uv + float2(-1, 1) * px, c.edge), L), se = dot(tap(t, s, uv + float2(1, 1) * px, c.edge), L), lm = dot(m.rgb, L);\n"
+            "  float lo = min(lm, min(min(nw, ne), min(sw, se))), hi = max(lm, max(max(nw, ne), max(sw, se)));\n"
+            "  float2 dir = float2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));\n"
+            "  float reduce = max((nw + ne + sw + se) * (0.25 / 8.0), 1.0 / 128.0);\n"
+            "  dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + reduce), -8.0, 8.0) * px;\n"
+            "  float3 a = 0.5 * (tap(t, s, uv + dir * (1.0 / 3.0 - 0.5), c.edge) + tap(t, s, uv + dir * (2.0 / 3.0 - 0.5), c.edge));\n"
+            "  float3 b = a * 0.5 + 0.25 * (tap(t, s, uv - dir * 0.5, c.edge) + tap(t, s, uv + dir * 0.5, c.edge));\n"
+            "  float lb = dot(b, L);\n"
+            "  return float4(lb < lo || lb > hi ? a : b, m.a);\n"
+            "}\n";
+        static int fxaa = -1;
+        if (fxaa < 0) { const char *e = getenv("DM_FXAA"); fxaa = e && atoi(e) > 0; if (fxaa) MLOG("present: FXAA on (DM_FXAA)"); }
         NSError *e = nil;
         id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src_msl) options:nil error:&e];
         if (!lib) MDIE("present shader compile failed %s", e.localizedDescription.UTF8String);
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
-        pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
+        pd.vertexFunction = [lib newFunctionWithName:@"vs"]; pd.fragmentFunction = [lib newFunctionWithName:fxaa ? @"fs_fxaa" : @"fs"];
         pd.colorAttachments[0].pixelFormat = format;
         g_blit_pso = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         if (!g_blit_pso) MDIE("present pipeline failed %s", e.localizedDescription.UTF8String);
