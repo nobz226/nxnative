@@ -159,3 +159,6 @@ int main(void) {
     puts("audren work buffer: Horizon sizing fixtures, both opens, nested open, failures and close lifetime passed");
     return 0;
 }
+
+int dm_thread_host_wait_begin(void) { return -1; }   // hle_thread.c is not linked here
+void dm_thread_host_wait_end(int prev) { (void)prev; }

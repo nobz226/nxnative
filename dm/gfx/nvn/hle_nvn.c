@@ -1126,7 +1126,7 @@ static pthread_mutex_t g_susp_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_susp_cv = PTHREAD_COND_INITIALIZER;
 static int g_susp, g_inflight_api;
 __thread _Atomic int dm_host_work;   // see hle.h (defined here: the graphics unit tests compile this file but not hle_thread.c)
-static void gfx_enter(void) { pthread_mutex_lock(&g_susp_mu); while (g_susp) pthread_cond_wait(&g_susp_cv, &g_susp_mu); g_inflight_api++; pthread_mutex_unlock(&g_susp_mu); dm_host_work++; }
+static void gfx_enter(void) { pthread_mutex_lock(&g_susp_mu); { int hw = dm_thread_host_wait_begin(); while (g_susp) pthread_cond_wait(&g_susp_cv, &g_susp_mu); dm_thread_host_wait_end(hw); } g_inflight_api++; pthread_mutex_unlock(&g_susp_mu); dm_host_work++; }
 static void gfx_leave(void) { dm_host_work--; pthread_mutex_lock(&g_susp_mu); g_inflight_api--; pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu); }
 void dm_gfx_enter(void) { gfx_enter(); }   // the same gate for the Vulkan layer's submits and presents (dm/gfx/vk)
 void dm_gfx_leave(void) { gfx_leave(); }

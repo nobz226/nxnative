@@ -121,6 +121,12 @@ static thr_t *cur(void) {
 // See docs/reference/threads.md, "Same-core wake handoffs", for the movie lifetime failure this prevents.
 // svc_thread calls it after waking such a thread. Wait for guest blocking, not a host dispatch snapshot or a wall-clock deadline: neither establishes that the work has finished.
 void dm_thread_mark_host(void) { thr_t *t = pthread_getspecific(g_keythr); if (t) t->host_owned = 1; }
+// A host-handled call that blocks its guest thread on a host condition (the notification queue, a movie job, the audio queue, the clock freeze, the
+// graphics suspend) leaves the thread runnable as far as the guest kernel can tell; dm_yield_to_core_peers then waited for it forever (Mario Kart 8
+// Deluxe: the main thread yielded to a higher-priority thread blocked in nn::oe::PopNotificationMessage, before the first frame). Mark such a wait as
+// sleeping. Returns the previous state for dm_thread_host_wait_end; -1 on a host thread
+int dm_thread_host_wait_begin(void) { thr_t *t = pthread_getspecific(g_keythr); if (!t) return -1; int p = t->sleeping; t->sleeping = 1; return p; }
+void dm_thread_host_wait_end(int prev) { thr_t *t = pthread_getspecific(g_keythr); if (t && prev >= 0) t->sleeping = prev; }
 // Holding G. wake() clears wkind before the pthread resumes; it must already count as runnable in that window, even if Mach still reports WAITING / STOPPED.
 // Explicit host GPU work does not occupy a guest core. Ordinary host dispatch delays and HLE calls do, until a guest wait / sleep / exit says otherwise.
 static int thr_runnable(const thr_t *t) {

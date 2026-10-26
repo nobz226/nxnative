@@ -80,7 +80,7 @@ static pthread_cond_t g_gfz_cv = PTHREAD_COND_INITIALIZER; static _Atomic int g_
 void guest_clock_read_wait(void) {
     if (!atomic_load(&g_gfz_bg) || atomic_load(&dm_host_work)) return;
     pthread_mutex_lock(&g_gfz_mu);
-    while (g_gfz_reasons & 2u) pthread_cond_wait(&g_gfz_cv, &g_gfz_mu);
+    { int hw = dm_thread_host_wait_begin(); while (g_gfz_reasons & 2u) pthread_cond_wait(&g_gfz_cv, &g_gfz_mu); dm_thread_host_wait_end(hw); }
     pthread_mutex_unlock(&g_gfz_mu);
 }
 void guest_clock_freeze_for(int reason, int on) {

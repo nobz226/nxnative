@@ -398,7 +398,7 @@ static void *md_worker(void *arg) {
 static void md_job(mdec_t *d, int job) {
     pthread_mutex_lock(&d->wmu);
     d->job = job; pthread_cond_broadcast(&d->wcv);
-    while (d->job != MDJ_NONE) pthread_cond_wait(&d->wcv, &d->wmu);
+    { int hw = dm_thread_host_wait_begin(); while (d->job != MDJ_NONE) pthread_cond_wait(&d->wcv, &d->wmu); dm_thread_host_wait_end(hw); }
     pthread_mutex_unlock(&d->wmu);
 }
 // while packets are queued and an output slot is free, decode the head packet, until the queue is empty or every slot is taken; signal the input / output events by the result

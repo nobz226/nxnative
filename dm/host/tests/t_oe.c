@@ -124,3 +124,6 @@ int main(void) {
     CHECK(pop_is(15) && empty(), "focus mode 1: focus notification 15");
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }
+
+int dm_thread_host_wait_begin(void) { return -1; }   // hle_thread.c is not linked here
+void dm_thread_host_wait_end(int prev) { (void)prev; }
