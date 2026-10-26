@@ -2643,6 +2643,15 @@ static void smaa_apply(id<MTLTexture> att) {
 }
 static void fx_apply(id<MTLTexture> att) {
     if (att.textureType != MTLTextureType2D || att.sampleCount != 1) { RED_ONCE(170, "DM_FXAA_SCENE: the pass's color attachment is not a plain 2D texture; FXAA skipped"); return; }
+    // Only a displayable (unorm) image: a game can draw with the same shader into an HDR float target too (Metroid Dread's key writes a 1600x900 float image and the 900p
+    // picture each frame); anti-aliasing belongs after tone mapping, and alternating targets made the scratch copy be rebuilt every frame (a GPU fault, a purple screen)
+    switch (att.pixelFormat) {
+        case MTLPixelFormatRGBA16Float: case MTLPixelFormatRG11B10Float: case MTLPixelFormatRGB9E5Float: case MTLPixelFormatRGBA32Float: case MTLPixelFormatR16Float:
+        case MTLPixelFormatRG16Float: case MTLPixelFormatR32Float: case MTLPixelFormatRG32Float: case MTLPixelFormatBGR10_XR: case MTLPixelFormatBGRA10_XR:
+            { static int n; if (!n++) MLOG("anti-aliasing: a pass drawn with %s writes a float (HDR) image (format %lu); only its displayable images are anti-aliased", g_fx_key, (unsigned long)att.pixelFormat); }
+            return;
+        default: break;
+    }
     NSUInteger w = att.width, h = att.height;
     if (!g_fx_tmp || g_fx_tmp.width != w || g_fx_tmp.height != h || g_fx_tmp.pixelFormat != att.pixelFormat) {
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:att.pixelFormat width:w height:h mipmapped:NO];
