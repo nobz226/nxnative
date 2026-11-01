@@ -9212,10 +9212,12 @@ static void fb_prepare(NvProg *pr) {
         if (R.rt.depth && R.rt.depth->serial == ser && g_fb_n < 4 && fb_depth_on()) {
             uint64_t aser; int lv, sl; rt_sub(&R.rt, 8, &aser, &lv, &sl);
             os_unfair_lock_lock(&g_rmu); void *tv = NULL; tex_fast_rid(tid, &tv); id<MTLTexture> t = (__bridge id<MTLTexture>)tv; os_unfair_lock_unlock(&g_rmu);
-            if (!t || t.parentTexture || t.textureType != MTLTextureType2D || t.sampleCount != 1 || t.mipmapLevelCount != 1 || lv || sl || b->dtt != MTLTextureType2D) continue;
+            if (!t || t.textureType != MTLTextureType2D || t.sampleCount != 1 || t.mipmapLevelCount != 1 || lv || sl || b->dtt != MTLTextureType2D) continue;
+            id<MTLTexture> dbase = t.parentTexture ? t.parentTexture : t;   // Breath of the Wild samples it through a swizzled view: the same view of the copy
+            if (dbase.parentTexture || dbase.mipmapLevelCount != 1 || dbase.textureType != MTLTextureType2D || (t.parentTexture && (t.parentRelativeLevel || t.parentRelativeSlice))) continue;
             int dup = 0; for (int q = 0; q < g_fb_n; q++) dup |= g_fb_src[q] == t; if (dup) continue;
             int fresh; fb_cache_t *e = fb_snap(ser, 0, 0, t.pixelFormat, t.width, t.height, 0, &fresh); if (!e) continue;
-            if (fresh) { if (g_enc) rp_end(); id<MTL4ComputeCommandEncoder> be = blit(); enc_b_copy_texture(be, t, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(t.width, t.height, 1), e->snap, 0, 0, MTLOriginMake(0, 0, 0)); }
+            if (fresh) { if (g_enc) rp_end(); id<MTL4ComputeCommandEncoder> be = blit(); enc_b_copy_texture(be, dbase, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(t.width, t.height, 1), e->snap, 0, 0, MTLOriginMake(0, 0, 0)); }
             if (!g_enc) fb_pass_sync();
             MTLTextureSwizzleChannels sw = t.swizzle;
             int same = sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
