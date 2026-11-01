@@ -9,6 +9,8 @@
 #include "hle.h"
 #include "dm.h"
 #include "haptics_apple.h"
+#include "save_sync.h"
+#import "DataBookmark.h"
 
 UIView *dm_gamepad_view(CGRect frame);
 void dm_gamepad_reset(void);
@@ -17,6 +19,7 @@ void front_ios_boot(void);
 int front_ios_boot_ok(void);
 const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
+int dm_locate_game_data(void);   // main.m: (re)decide where the game data is; NO when there still is none
 
 static CAMetalLayer *g_layer;
 static void front_ios_power_watch(void);
@@ -48,6 +51,7 @@ static UILabel *front_ios_fps_label(void);
 @property (nonatomic, strong) UIView *pad;
 @property (nonatomic, strong) UILabel *fps;
 @property (nonatomic) BOOL launched;
+@property (nonatomic) BOOL hasLauncher;   // the app has a settings screen: a failed Play goes back to it (its Game data section is the way out)
 - (void)startGame;
 @end
 static DmRootVC *g_root;
@@ -70,6 +74,15 @@ static void launcher_done(void) { [g_root startGame]; }
 // The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
 - (void)startGame {
     if (self.game) return;
+    if (!dm_locate_game_data()) {   // no game data (nothing picked, nothing in Documents): the game cannot start
+        if (self.hasLauncher) { dm_show_launcher((__bridge void *)self, launcher_done); return; }   // back to the settings screen, whose Game data section picks a location
+        UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
+        lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        lb.numberOfLines = 0; lb.textAlignment = NSTextAlignmentCenter; lb.textColor = UIColor.whiteColor;
+        lb.text = @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart.";
+        [self.view addSubview:lb]; return;
+    }
+    dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (DataBookmark.m, save_sync.h)
     front_hud_env();   // before the game view makes its device (an env file's DM_METAL_HUD sets it in main.m already)
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
@@ -105,7 +118,8 @@ static void launcher_done(void) { [g_root startGame]; }
     }
     if (self.launched || !front_ios_boot_ok()) return;
     self.launched = YES; g_root = self;
-    if (!dm_show_launcher((__bridge void *)self, launcher_done)) [self startGame];   // the settings screen first (Launcher.swift), when the app has one
+    self.hasLauncher = dm_show_launcher((__bridge void *)self, launcher_done);
+    if (!self.hasLauncher) [self startGame];   // the settings screen first (Launcher.swift), when the app has one
 }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
@@ -261,11 +275,23 @@ static void front_ios_audio_watch(void) {
 
 // Scene lifecycle (called by SceneDelegate in main.m): 0 resign active, 1 enter background, 2 return to foreground, 3 become active. On entering background, freeze the guest clock and suspend after in-flight GPU work completes (submitting GPU work in background gets the process killed).
 // The screen stays on while the game is active: only touches reset the idle timer, so with a controller (or during a cutscene) the screen dimmed and locked mid-game
+// Cloud saves (save_sync.h): what the game committed goes out before iOS suspends the app, without the sender's quiet wait. iOS gives a background task about half a minute
+static void save_sync_background(void) {
+    UIApplication *app = UIApplication.sharedApplication;
+    __block UIBackgroundTaskIdentifier task = UIBackgroundTaskInvalid;
+    void (^end)(void) = ^{ if (task != UIBackgroundTaskInvalid) { [app endBackgroundTask:task]; task = UIBackgroundTaskInvalid; } };   // on the main queue, as the expiry handler runs
+    task = [app beginBackgroundTaskWithName:@"cloud save" expirationHandler:end];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        if (!save_sync_flush(20000)) LOG("front end: the save did not reach the cloud before the app was suspended; it goes after the next save or at the next start");
+        dispatch_async(dispatch_get_main_queue(), end);
+    });
+}
+
 void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
         case 0: dm_gamepad_reset(); dm_focus_set(2); break;
-        case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); break;
+        case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
         case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); g_audio_bg = 0; front_ios_audio_apply(); dm_focus_set(2); break;
         case 3:   // Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
             UIApplication.sharedApplication.idleTimerDisabled = YES;
