@@ -107,6 +107,29 @@ static void probe_dump_once(void) {
     fwrite(m->base + strtoull(o, 0, 16), 1, strtoull(n, 0, 16), fp); fclose(fp);
     LOG("probe dump %s+%s length %s → %s", mod, o, n, f ? f : def);
 }
+// DIAGNOSTIC (issue #768, not for upstream): DM_NU_TRACK=<file> logs the nu:: allocator's blocks in a 0x3000 page of 64 KB
+extern uint32_t thr_cur_handle(void); static FILE *g_nu_f; static _Thread_local uint64_t g_nu_req;
+static const char *nu_mod(uint64_t a, char *b, size_t n) { module_t *m = module_of((void *)a); if (m) snprintf(b, n, "%s+%llx", m->name, (unsigned long long)(a - (uint64_t)m->base)); else snprintf(b, n, "%llx", (unsigned long long)a); return b; }
+static void nu_callers(ucontext_t *uc, char *o, size_t n) { uint64_t fp = uc->uc_mcontext->__ss.__fp, l1 = 0, l2 = 0, fp2 = 0; rd64(fp + 8, &l1); rd64(fp, &fp2); if (fp2) rd64(fp2 + 8, &l2); char a[64], b[64]; snprintf(o, n, "%s %s", nu_mod(l1, a, sizeof a), nu_mod(l2, b, sizeof b)); }
+static void nu_barrier(module_t *m, int kind) {   // DM_NU_BARRIER: 1 dmb ish, 2 dsb ish + isb, in the two do-nothing branches at the start of the allocator's free
+    uint32_t *w = (uint32_t *)(m->base + 0x392eb50); if (w[0] != 0x14000001 || w[1] != 0x14000001) die("nu barrier: not the expected code");
+    uint64_t pg = (uint64_t)w & ~0x3FFFull; if (mprotect((void *)pg, 0x4000, PROT_READ | PROT_WRITE)) die("nu barrier mprotect");
+    static const uint32_t ops[5][2] = { {0,0}, {0xD5033BBF, 0xD503201F}, {0xD5033B9F, 0xD5033FDF}, {0xD5033B9F, 0xD503201F}, {0xD5033FDF, 0xD503201F} };   // 3 dsb ish only, 4 isb only
+    w[0] = ops[kind][0]; w[1] = ops[kind][1];
+    if (mprotect((void *)pg, 0x4000, PROT_READ | PROT_EXEC)) die("nu barrier mprotect back"); sys_icache_invalidate((void *)pg, 0x4000); LOG("nu allocator barrier %d", kind);
+}
+static void nu_nop(ucontext_t *uc) { (void)uc; }
+static void nu_enter(ucontext_t *uc) { g_nu_req = uc->uc_mcontext->__ss.__x[1]; }
+static void nu_exit(ucontext_t *uc) {
+    uint64_t rq = g_nu_req, out = 0, p = 0, size = 0; if (!rq || !rd64(rq, &out) || !out || !rd64(out, &p) || (p & 0xf000) != 0x3000) return; rd64(rq + 0x18, &size);
+    char w[140]; nu_callers(uc, w, sizeof w); uint64_t x = 0; rd64(p, &x);
+    fprintf(g_nu_f, "A %llx size %llx w0 %llx F%llu T%x %s\n", (unsigned long long)p, (unsigned long long)size, (unsigned long long)x, (unsigned long long)dm_guest_frame(), thr_cur_handle(), w);
+}
+static void nu_free(ucontext_t *uc) {
+    uint64_t p = uc->uc_mcontext->__ss.__x[0]; if (!p || (p & 0xf000) != 0x3000) return;
+    uint64_t a = 0, b = 0, c = 0; rd64(p, &a); rd64(p + 8, &b); rd64(p + 16, &c); char w[140], l[64]; nu_callers(uc, w, sizeof w);
+    fprintf(g_nu_f, "F %llx w %llx %llx %llx F%llu T%x lr %s %s\n", (unsigned long long)p, (unsigned long long)a, (unsigned long long)b, (unsigned long long)c, (unsigned long long)dm_guest_frame(), thr_cur_handle(), nu_mod(uc->uc_mcontext->__ss.__lr, l, sizeof l), w);
+}
 static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the SIGTRAP branch of crash.c
     uint64_t pc = uc->uc_mcontext->__ss.__pc;
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
@@ -371,6 +394,11 @@ void probe_install(void) {
     }
     const char *limit = getenv("DM_PROBE_LIMIT");
     if (limit) g_probe_limit = (unsigned)strtoul(limit, NULL, 10);
+    { const char *nb = getenv("DM_NU_BARRIER"); if (nb && atoi(nb)) for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) nu_barrier(&g_mod[i], atoi(nb)); }
+    { const char *nf = getenv("DM_NU_TRACK"), *mo = getenv("DM_NU_MODE"); int mode = mo ? atoi(mo) : 0; if (mode) { module_t *nm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) nm = &g_mod[i];
+        if (mode & 1) { probe_add(nm, 0x392cf50, -1, nu_nop); probe_add(nm, 0x392d01c, -1, nu_nop); } if (mode & 2) probe_add(nm, 0x392eb40, -1, nu_nop); LOG("nu allocator hooks mode %d", mode); }
+      if (nf && (g_nu_f = fopen(nf, "w"))) { setvbuf(g_nu_f, NULL, _IOLBF, 0); module_t *nm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) nm = &g_mod[i];
+        probe_add(nm, 0x392cf50, -1, nu_enter); probe_add(nm, 0x392d01c, -1, nu_exit); probe_add(nm, 0x392eb40, -1, nu_free); LOG("nu allocator tracking on"); } }
     const char *e = getenv("DM_PROBE");
     if (e) {
         char spec[512]; strlcpy(spec, e, sizeof spec);
