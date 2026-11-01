@@ -1898,7 +1898,19 @@ static MTLTextureUsage img_usage(const tex_t *t, MTLPixelFormat pf) {
 // texture the host makes has it (img_usage, tex_upgrade, dummy_img_atomic), and that is what this tests
 static int tex_atomic_capable(id<MTLTexture> base) { return pf_r32i(base.pixelFormat) && (base.usage & MTLTextureUsageShaderWrite); }
 // DM_NVN_NO_GPU_OPT=1: textures without Apple's lossless compression. Donkey Kong Country: Tropical Freeze drew flickering background rectangles with it (issue #676); why is not known
-static int no_gpu_opt(void) { static int on = -1; if (on < 0) on = getenv("DM_NVN_NO_GPU_OPT") != NULL; return on; }
+// Which textures: 1 all, 2 packaged or block-compressed assets, 3 render targets, 4 image families sharing a placement heap (image_texture), 5 colour render targets, 6 depth / stencil render targets
+static int no_gpu_opt_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_NO_GPU_OPT"); m = e ? atoi(e) : 0; } return m; }
+static int no_gpu_opt(const tex_t *t, MTLTextureDescriptor *d) {
+    int mode = no_gpu_opt_mode(); if (!mode || mode == 4) return 0;
+    int rt = (d.usage & MTLTextureUsageRenderTarget) != 0, ds = d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || d.pixelFormat == MTLPixelFormatDepth32Float || d.pixelFormat == MTLPixelFormatDepth16Unorm || d.pixelFormat == MTLPixelFormatStencil8;
+    int hit = mode == 1 || (mode == 2 && !rt) || (mode == 3 && rt) || (mode == 5 && rt && !ds) || (mode == 6 && rt && ds);
+    { const char *only = getenv("DM_NVN_NO_GPU_OPT_ONLY");   // =<Metal pixel format>:<W>x<H>,...: of those, only these
+      if (hit && only) { char sz[32]; snprintf(sz, sizeof sz, "%lu:%lux%lu", (unsigned long)d.pixelFormat, (unsigned long)d.width, (unsigned long)d.height); size_t n = strlen(sz); const char *p = only; int in = 0;
+          while ((p = strstr(p, sz))) { if ((p == only || p[-1] == ',') && (p[n] == ',' || !p[n])) { in = 1; break; } p += n; }
+          hit = in; } }
+    if (hit && rt) { static uint64_t seen[64]; static int ns; uint64_t k = (uint64_t)d.pixelFormat << 40 | (uint64_t)d.width << 20 | d.height; int dup = 0; for (int i = 0; i < ns; i++) dup |= seen[i] == k; if (!dup && ns < 64) { seen[ns++] = k; MLOG("no lossless compression: render target format %lu %lux%lu", (unsigned long)d.pixelFormat, (unsigned long)d.width, (unsigned long)d.height); } }
+    return hit;
+}
 static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     uint32_t pf = 0; uint8_t swz[4];
     if (!nvn_fmt_to_mtl(t->d.format, &pf, swz) || !pf) { RED_ONCE(0, "texture format %#x has no Metal equivalent (first case)", t->d.format); return nil; }
@@ -1955,7 +1967,7 @@ static MTLTextureDescriptor *tex_desc(const tex_t *t, int packaged) {
     // Mansion 3), and upgrading later would recreate a depth buffer in use. Unlike colour formats it costs nothing measured: on an M4 Pro a 2560x1440 one has the same allocated size and the same
     // GPU time over eight load / store passes with and without it
     if (d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) d.usage |= MTLTextureUsagePixelFormatView;
-    if (no_gpu_opt()) d.allowGPUOptimizedContents = NO; return d;
+    if (no_gpu_opt(t, d)) d.allowGPUOptimizedContents = NO; return d;
 }
 // In-place upgrade: when the original texture was not created with PixelFormatView (off by default, to keep Apple GPU lossless compression) but a different-format view is needed, create a new one with the original spec + PixelFormatView, copy over every slice × level, and replace the registration.
 // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
@@ -2610,6 +2622,7 @@ static uint64_t g_texinfo_ser[8]; static int g_texinfo_n;
 // layouts: a changed layout is initialized by its GPU writer. Creating its descriptor must not zero another alias's live content in the earlier upload batch.
 static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d) {
     if (!image_shape(t) || !t->pool->mem || !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || nvn_sparse_pool(t->pool)) return nil;
+    if (no_gpu_opt_mode() == 4) d.allowGPUOptimizedContents = NO;
     MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
     if (!need.size) return nil;
     NvImageHeap *owner = nil; MTLTextureDescriptor *largest = d; NSUInteger capacity = need.size; int family = 0;
@@ -2628,6 +2641,7 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d) {
         if (other->pool != t->pool || other->off != t->off || other->d.format != t->d.format) continue;
         family |= other->d.width != t->d.width || other->d.height != t->d.height;
         MTLTextureDescriptor *od = tex_desc(other, 0); if (!od) continue;
+        if (no_gpu_opt_mode() == 4) od.allowGPUOptimizedContents = NO;
         MTLSizeAndAlign sz = [g_dev heapTextureSizeAndAlignWithDescriptor:od];
         if (sz.size > capacity) { capacity = sz.size; largest = od; }
     }
