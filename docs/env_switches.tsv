@@ -12,6 +12,11 @@ DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing,
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
 DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
+DM_CHEATS	path	Folder of Atmosphère cheat files: `<folder>/<build ID>.txt` or an SD-card layout (`atmosphere/contents/<title ID>/cheats/`) under it (default `<DM_ROOT>/cheats`); the Mac menu lists and toggles them
+DM_CHEATS_ANY_BUILD	switch	`1` loads a cheat file written for another build of the game when it is the only one (its addresses may not fit: for `cheat_anchor.py` checks)
+DM_CHEATS_DEBUG	diagnostic	Logs every memory write a cheat makes and the cheat file context the menu's "another version" rows come from
+DM_CHEATS_ON	switch	Comma-separated cheat names turned on at launch, besides the saved per-build enabled states
+DM_CHEATS_WINDOW	switch	`1` opens the Mac Cheats panel beside the game from the start
 DM_COPY_GAME_RESOURCES	switch	`NO` skips the Xcode build phase that copies the game's resources into the app (`stage_resources.sh`, on by default); `build_ipa.sh` sets it for its unsigned build, which packs them itself
 DM_COPY_ROMFS	switch	`NO` keeps the game files out of the app, in the Xcode build phase (`stage_resources.sh`) and in the unsigned IPA of `build_ipa.sh` (on by default): `main.m` takes the validated `Documents/romfs.img` copied by `scripts/push_romfs.sh`, then a `Documents/romfs` folder; the build writes the image's identity as `romfs.id` into the app, and `main.m` uses only a matching image (`--romfs separate` of the NSP script sets this)
 DM_CTL	diagnostic	`=<file>` (Mac): the host polls the file every 100 ms and runs each appended line: button presses, `shot`, `passdump`, `texdump`, `env KEY=VALUE`, `peek`, `memdump`, `drag` and more
@@ -36,6 +41,7 @@ DM_FS	diagnostic	When set, logs file opens, paths not found or not mounted, and 
 DM_FSLOG	diagnostic	`=<file>` writes one TSV line per ReadFile: seconds since boot, guest path, offset, length and guest buffer address
 DM_FSLOG_HASH	diagnostic	With `DM_FSLOG`, adds a column with the FNV-1a 64 hash of the bytes read
 DM_FULLSCREEN	player	`1` (any value but `0`) starts the Mac window in fullscreen; `0` or unset, a window. The Mac settings window's Display mode
+DM_FULL_ROMFS	diagnostic	`=1` in `build_ipa.sh` packs the game data into the IPA as it did before the slim package; the default leaves it in `Documents/games/<id>/` (`romfs.img`, `aoc/<index>.img`) and the DLC beside it. Only for small games — a full package of a large one is many GB and iOS refuses it (`PackageExtractionFailed`)
 DM_GAME	switch	Selects the game profile (a title ID under `dm/games` or `DM_GAMES_DIR`) for the Python tools and the rewriter; there is no default
 DM_GAMES_DIR	path	Profile folders outside the repository, separated by `:`, searched after `dm/games`; the NSP script points it at a provisional or derived profile
 DM_GAMES_FIRST	switch	`=1` searches `DM_GAMES_DIR` before `dm/games`, so a provisional or derived profile wins over the game's own (the NSP script's `--provisional`)
@@ -58,6 +64,7 @@ DM_ICON	path	`=<image>` gives `build_ipa.sh` another app icon (default the `icon
 DM_IMPORTS	diagnostic	When set, logs each import the loader binds to a host function and each forced takeover
 DM_KBD	switch	`=<text>`: the system keyboard returns that text as OK without showing an input box; unset with no window, it returns cancel
 DM_KBD_PLAYER	switch	`own` makes the Mac keyboard player 1 on its own, with controllers from player 2 on (by default the first controller shares player 1 with the keyboard)
+DM_KEYMAP	player	Mac keyboard: `<name>=<key code>,…` puts a button (`A` … `Down`), a stick direction (`LUp` … `RRight`) or `Shake` on another key (macOS virtual key code, or `none`); one key holds one function (`input_map.h`)
 DM_KEYS	switch	Scripted input: `<seconds or f<frame>>:<key>[+key][~hold][*count/interval],…` presses buttons, sticks and `Shake` at those times
 DM_LANG	player	Game language as a language code (default `en-US`; the iOS app sets the one the IPA was packed with)
 DM_LAUNCHER	switch	`0` skips the iOS settings screen or the Mac settings window and starts the game at once, with the saved choices (on the Mac also `--no-launcher`)
@@ -186,6 +193,7 @@ DM_OODLE_JOB	path	`=<job file>`: the host runs the game's own Oodle decoder on e
 DM_OODLE_MODULES	path	The rewritten modules the Mac host's Oodle tool mode loads when `shader_split.py` decodes Trinity packs; set by the NSP script
 DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout with the game's own Oodle (or LZ5) decoder from the guest main thread before the SDK starts, until stdin ends
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
+DM_PAD_MAP	player	Mac controllers: `<name>=<name>,…` makes the button that sends the first by default send the second (or `none`), e.g. `A=B,B=A` swaps them (`input_map.h`)
 DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
 DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
 DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
@@ -211,6 +219,7 @@ DM_PROBE_LIMIT	diagnostic	Maximum printed hits per guest probe; 0 or absent leav
 DM_PROBE_POLL	diagnostic	`=<address>[+<length>]` (hex, 4 bytes by default, up to 8): a host thread spins on the bytes and on each change snapshots every thread's pc, lr and frames, for writes the watch misses
 DM_PROBE_WATCH	diagnostic	`=<address>[+<length>]` (hex, 8 bytes by default): write-protects that host page and reports who writes these bytes, without a debugger
 DM_PROBE_X2	diagnostic	`=<bytes>` (hex): probe hits also dump that many bytes of the memory x2 points to
+DM_PROFILE	path	`=<file>`: the runtime game profile (layout, switches, tables) the host reads at start, which is how one host binary serves every game (the launcher architecture); the compiled `game_profile.h` stays the fallback, and `DM_PROF_<key>` overrides sit on top of it (`hle_profile.h`)
 DM_PROGRAM_ID	switch	`=<hex>`: the program ID the host reports from `svcGetInfo(ProgramId)` (default: the profile's `program_id`)
 DM_PSO_ARCHIVE	path	The folder of the per-game Metal 4 pipeline archive of pipeline bases (default `pso_archive/` beside `pso_user.tsv`); `off` keeps no archive
 DM_PSO_BUNDLE	path	The pipeline archive made offline (`<GPU architecture>.mtl4a`, `prebuilt.tsv`), read only; the iOS app and Mac launcher set it to their `pso/` folder; `off` ignores it
@@ -257,6 +266,7 @@ DM_SAVE	path	This run's save folder (must be set); the device save is `<DM_SAVE>
 DM_SAVED_CHOICES	switch	`0` ignores the player's saved choices (launcher.<VAR> in the app's preferences) and leaves them saved; the Mac launcher and the iOS settings screen
 DM_SAVE_SYNC	player	Cloud saves: the folder whose `<title ID>/save.dmsync` the save is synced through, `icloud` for iCloud Drive/nxnative Saves (the Mac); `0` or unset, off. The Mac launcher sets the folder chosen in its settings window's Cloud saves, the iPhone app the one picked in its launcher (dm/host/save_sync.h)
 DM_SCHEME_NAME	switch	Set by `build_ipa.sh` itself for xcodegen's `project.yml`: the Xcode scheme name, `DmIOS`, or `<display name> (<title ID>)` for a project prepared with `--prepare-xcode`
+DM_SCREEN	player	`=<number>` opens the Mac window on the connected screen with that `NSScreenNumber` (`CGDirectDisplayID`), centred, before any `DM_FULLSCREEN` request; an unknown number is logged and ignored. The NX2Apple launcher sets it to its own window's screen
 DM_SCREEN_MATCH	switch	`0` keeps the screen's refresh rate in fullscreen; by default a Mac screen whose rate is not a multiple of the game's frame rate switches to one that is (144 → 120 Hz)
 DM_SF_TRACE	diagnostic	`=1` logs every request on the game's own HIPC client sessions that the host answers (`hle_sf.c`)
 DM_SHAKE_G	switch	`=<G>`: on iOS, the acceleration beyond gravity above which a flick of the phone shakes the controller's six-axis sensor (default 1.5)
