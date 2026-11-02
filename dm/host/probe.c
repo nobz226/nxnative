@@ -474,6 +474,10 @@ void probe_install(void) {
         if (mode & 1) { probe_add(nm, 0x392cf50, -1, nu_nop); probe_add(nm, 0x392d01c, -1, nu_nop); } if (mode & 2) probe_add(nm, 0x392eb40, -1, nu_nop); LOG("nu allocator hooks mode %d", mode); }
       if (nf && (g_nu_f = fopen(nf, "w"))) { setvbuf(g_nu_f, NULL, _IOLBF, 0); module_t *nm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) nm = &g_mod[i];
         probe_add(nm, 0x392cf50, -1, nu_enter); probe_add(nm, 0x392d01c, -1, nu_exit); probe_add(nm, 0x392eb40, -1, nu_free); LOG("nu allocator tracking on"); } }
+    if (getenv("DM_768_PAD")) for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {   // the movie stream's pending buffer: 16 KB instead of 4
+        uint32_t *w = (uint32_t *)(g_mod[i].base + 0x36f5fd8); if (*w != 0xb9404e68) die("768 pad: not the expected code (%08x)", *w);
+        uint64_t pg = (uint64_t)w & ~0x3FFFull; if (mprotect((void *)pg, 0x4000, PROT_READ | PROT_WRITE)) die("768 pad mprotect");
+        *w = 0x52880008; if (mprotect((void *)pg, 0x4000, PROT_READ | PROT_EXEC)) die("768 pad mprotect back"); sys_icache_invalidate(w, 4); LOG("768 pending buffer 16 KB"); }
     if (getenv("DM_768")) { module_t *nm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) nm = &g_mod[i];
         probe_add(nm, 0x36f603c, -1, n768_start); probe_add(nm, 0x36f63d0, -1, n768_init); probe_add(nm, 0x36ef7a0, -1, n768_dtor);
         pthread_t t; pthread_create(&t, NULL, p768_run, NULL); pthread_detach(t); LOG("768 logging on"); }
