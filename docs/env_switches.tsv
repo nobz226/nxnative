@@ -88,6 +88,7 @@ DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
 DM_NICK	switch	The account nickname the game sees (default `Player`)
+DM_NPAD_JOYDUAL	switch	`1` reports the controller as a pair of Joy-Cons, for games that offer motion controls only with them (Skyward Sword HD)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NU_BARRIER	diagnostic	`2` puts `dsb ish` + `isb` at the start of the nu:: allocator free in Super Smash Bros. Ultimate 13.0.5 (stopgap for the crash in #768; cause unknown)
 DM_NU_MODE	diagnostic	Diagnostic allocator traps in Super Smash Bros. Ultimate 13.0.5: 1 allocate, 2 free, 3 both

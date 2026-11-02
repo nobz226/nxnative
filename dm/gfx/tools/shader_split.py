@@ -2310,6 +2310,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     for m in re.finditer(b'SLCT\x03\x10\0\0', d): out.extend(slct_shaders(d, m.start(), label))
     stored = len(d)   # what the member takes up in its archive
+    if d[:2] == b'\x1f\x8b': d = __import__('gzip').decompress(d)   # gzip (Skyward Sword HD: Shaders/Shaders.arc.gz, a U8 archive of 2,096 GLSLC outputs; upstream PR #908 does this too)
     if d[:4] == b'Yaz0':
         if left is not None:   # charged by its header before it is decoded
             left[1] -= int.from_bytes(d[4:8], 'big')
