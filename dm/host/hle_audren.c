@@ -95,7 +95,7 @@ typedef struct {
     int16_t frame[FRAME_MAX * 2]; int frame_n;   // the latest frame (stereo int16)
     int16_t cq[CQ][FRAME_MAX * 2]; int cq_n[CQ]; _Atomic uint32_t cq_head, cq_tail;   // output queue of catch-up frames
     pthread_mutex_t cq_mu; pthread_cond_t cq_cv;   // the render thread signals each frame it takes off the queue (catch-up pacing)
-    _Atomic uint64_t renders; uint64_t last_r;     // frames rendered, and their count at the last RequestUpdate
+    _Atomic uint64_t renders; _Atomic uint64_t last_render_ns; uint64_t last_r;     // frames rendered, and their count at the last RequestUpdate
     int32_t up_buf[2 * (16 - 1 + FRAME_MAX)]; uint32_t up_pos;   // the 32 → 48 kHz resampler's history (up_3_2)
 } ar_t;
 static ar_t *g_ars[AR_MAX]; static pthread_mutex_t g_ars_mu = PTHREAD_MUTEX_INITIALIZER; static int g_ar_seq;
@@ -483,7 +483,7 @@ static Result render_once(ar_t *ar, uint8_t *sys, int16_t *dst, int *nout) {
     if (gen20) { span_t sp = gen20(sys, *(uint8_t **)(sys + 0xf8), *(size_t *)(sys + 0x100)); cl = sp.p; n = sp.n; }
     else { cl = cbuf(sys); n = gen(sys, cl, cbsz(sys)); }
     unlock(sys + mu_off);
-    if (ar) atomic_fetch_add(&ar->renders, 1);
+    if (ar) { atomic_fetch_add(&ar->renders, 1); atomic_store(&ar->last_render_ns, t0); }   // last_render_ns: for catchup_due
     uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor (0x58 bytes; 0x60 in SDK 21, whose Process reads +0x58)
     tmax(proc, 0xffffffffu); setup(proc, cl, n); process(proc);
     if (dst) *nout = capture(ar, cl, n, dst);
@@ -529,13 +529,20 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem29ExecuteAudioRendererRendering
 // queue was full ran it at 11,000 updates a second on one core, the game's sound about 50 times faster than the output. Waiting keeps the queue full instead: the render thread then
 // only plays queued frames, and the driver's own updates render every frame. A queued frame does not signal the renderer event: the SDK signals it in each render, and a game woken by a
 // queued frame updated with nothing rendered since, which rendered the next catch-up frame, and so on (Big Brain Academy: Brain vs. Brain, one catch-up per update instead of 37 a run)
+// A catch-up frame only where one is missing: the first updates, where effects get initialized, and an output that fell behind. A second update inside one 5 ms frame is normal: Donkey
+// Kong Country: Tropical Freeze's main thread updates once per video frame beside its audio thread's update per renderer event. A frame rendered for it advances the voices 5 ms before the
+// audio thread refills them, so they run dry for a moment, 60 times a second: the crackle, with no underrun in the log because the output never starves. The late limit is above the
+// longest gap an output's blocks can leave (512-frame device callbacks are 10.7 ms)
+enum { CATCHUP_STARTUP_UPDATES = 10 };
+#define CATCHUP_LATE_NS 20000000ull
+static int catchup_due(uint64_t update, uint64_t since_render_ns) { return update <= CATCHUP_STARTUP_UPDATES || since_render_ns > CATCHUP_LATE_NS; }
 HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer update: if nothing was rendered since the last update, render a catch-up frame first (so effects get initialized), then hand over to the SDK",
           Result, h_ars_Update, uint8_t *sys, void *o, size_t on, void *p, size_t pn, const void *in, size_t inn) {
     static Result (*orig)(void *, void *, size_t, void *, size_t, const void *, size_t); if (!orig) orig = gsym("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm");
     ar_t *a = ar_for(sys);
     if (!a) return orig(sys, o, on, p, pn, in, inn);   // not a renderer the host opened
     uint64_t u = atomic_fetch_add(&g_updates, 1) + 1, r = atomic_load(&a->renders);
-    if (a->last_r != ~0ull && r == a->last_r) {
+    if (a->last_r != ~0ull && r == a->last_r && catchup_due(u, now_ns() - atomic_load(&a->last_render_ns))) {
         uint64_t c = atomic_fetch_add(&g_catchups, 1) + 1;
         if (c <= 3) LOG("audren: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", (unsigned long long)u, (unsigned long long)c);
         uint32_t t = atomic_load(&a->cq_tail);
