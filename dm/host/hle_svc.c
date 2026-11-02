@@ -214,8 +214,8 @@ static void alias_initialize(uint64_t off, size_t size) {
 _Atomic uint64_t g_768_block;   // DIAGNOSTIC #768: the 64 KB block holding the crash object
 static void log768(const char *what, uint64_t a, uint64_t n, int64_t holes) {
     uint64_t b = atomic_load(&g_768_block); if (!b || a >= b + 0x10000 || a + n <= b) return;
-    uint32_t thr_cur_handle(void); extern uint64_t g_t0_ns; uint64_t now_ns(void);
-    fprintf(stderr, "[dm] 768 %s covers block %#llx [%.4fs] T=%x: %#llx +%#llx, not mapped before %lld bytes, word %#llx\n", what, (unsigned long long)b, (now_ns() - g_t0_ns) / 1e9, thr_cur_handle(), (unsigned long long)a, (unsigned long long)n, (long long)holes, (unsigned long long)*(volatile uint64_t *)(b + 0x3000));
+    uint32_t thr_cur_handle(void); extern uint64_t g_t0_ns; uint64_t now_ns(void); uint64_t w = 0; vm_size_t got = 0; vm_read_overwrite(mach_task_self(), b + 0x3000, 8, (vm_address_t)&w, &got);
+    fprintf(stderr, "[dm] 768 %s covers block %#llx [%.4fs] T=%x: %#llx +%#llx, not mapped before %lld bytes, word %#llx\n", what, (unsigned long long)b, (now_ns() - g_t0_ns) / 1e9, thr_cur_handle(), (unsigned long long)a, (unsigned long long)n, (long long)holes, (unsigned long long)w);
 }
 static int memory_contains(uint64_t base, uint64_t capacity, uint64_t addr, uint64_t size) {
     return addr >= base && size <= capacity && addr - base <= capacity - size;
