@@ -41,3 +41,4 @@ shader_note	Red Dead Redemption shaders
 # ---- After the rewrite ----
 # used memory for the current rewritten modules, at least the default 64 MB
 mem_used	0x4ca4000
+render_cond	on
