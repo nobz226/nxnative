@@ -394,6 +394,15 @@ void probe_install(void) {
     }
     const char *limit = getenv("DM_PROBE_LIMIT");
     if (limit) g_probe_limit = (unsigned)strtoul(limit, NULL, 10);
+    // Issue #768 stopgap (Super Smash Bros. Ultimate 13.0.5 only): the movie audio stream's pending buffer is 16 KB instead of 4 (main+0x36f5fd8, ldr w8,[x19,#0x4c] -> mov w8,#0x4000).
+    // A live graphics object right after that 4 KB block is wiped when the second movie ends (cause not found; nothing writes past the 4 KB); with the bigger block the crash after the
+    // tutorial movie stopped (2 runs, 18 and 12 minutes). On unless DM_768_PAD=0; skipped when the code at that address is not the expected one
+    { const char *pe = getenv("DM_768_PAD"); if (DM_GAME_PROGRAM_ID == 0x01006A800016E000ull && !(pe && !strcmp(pe, "0"))) for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
+        uint32_t *w = (uint32_t *)(g_mod[i].base + 0x36f5fd8);
+        if (*w != 0xb9404e68) { LOG("[RED] #768 stopgap: main+0x36f5fd8 is %08x, not the expected code; not applied", *w); break; }
+        uint64_t pg = (uint64_t)w & ~0x3FFFull; if (mprotect((void *)pg, 0x4000, PROT_READ | PROT_WRITE)) die("#768 stopgap mprotect");
+        *w = 0x52880008; if (mprotect((void *)pg, 0x4000, PROT_READ | PROT_EXEC)) die("#768 stopgap mprotect back"); sys_icache_invalidate(w, 4);
+        LOG("#768 stopgap: the movie stream's pending buffer is 16 KB"); } }
     { const char *nb = getenv("DM_NU_BARRIER"); if (nb && atoi(nb)) for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) nu_barrier(&g_mod[i], atoi(nb)); }
     { const char *nf = getenv("DM_NU_TRACK"), *mo = getenv("DM_NU_MODE"); int mode = mo ? atoi(mo) : 0; if (mode) { module_t *nm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) nm = &g_mod[i];
         if (mode & 1) { probe_add(nm, 0x392cf50, -1, nu_nop); probe_add(nm, 0x392d01c, -1, nu_nop); } if (mode & 2) probe_add(nm, 0x392eb40, -1, nu_nop); LOG("nu allocator hooks mode %d", mode); }

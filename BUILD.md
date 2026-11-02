@@ -13,3 +13,7 @@ Host only (keeps the shaders):
     codesign --force --sign - ../01006A800016E000.app
 
 Full game build: choose "This game's repo" under Build from in NX2Apple.
+
+## Crash stopgap (issue #768)
+
+The host makes the movie audio stream's pending buffer 16 KB (`dm/host/probe.c`, on by default for this game; `DM_768_PAD=0` turns it off). The crash after the tutorial movie stopped with it in 2 runs (18 and 12 minutes); the real cause is still open. `DM_NU_BARRIER` is not needed.
