@@ -365,6 +365,7 @@ static void n768_stream(ucontext_t *uc, int reg, const char *what) {
     rd64(t + 0x70, &v70); rd64(t + 0x88, &v88); rd64(t + 0x118, &pend); rd64(t + 0x38, &ring); rd64(t + 0xa0, &tmp); if (tmp) rd64(tmp + 0x28, &tmpd);
     fprintf(stderr, "[dm] 768 %s [%.4fs] T=%x stream %#llx vec70 %#llx vec88 %#llx pending %#llx ring %#llx temp %#llx\n", what, t768(), thr_cur_handle(), (unsigned long long)t, (unsigned long long)v70, (unsigned long long)v88, (unsigned long long)pend, (unsigned long long)ring, (unsigned long long)tmpd);
     if (pend && !atomic_load(&g_hw768)) atomic_store(&g_hw768, pend + 0x1000);
+    { extern _Atomic uint64_t g_768_block; if (pend) atomic_store(&g_768_block, (pend + 0x1000) & ~0xffffull); }
     if (pend) { w768_add(pend + 0x1000); w768_add(pend + 0x1008); w768_add(pend + 0x2000); }   // the blocks after the pending buffer: the crash block is pending + 0x1000
 }
 static void n768_start(ucontext_t *uc) { n768_stream(uc, 19, "start"); }
@@ -407,7 +408,7 @@ static void *p768_run(void *p) {
     (void)p; uint64_t addr[W768] = {0}, old[W768] = {0}; int snaps = 0; unsigned logged = 0; vm_size_t got;
     uint64_t cb_at = 0, cb_old = 0; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) cb_at = (uint64_t)g_mod[i].base + 0x6dd53c0;   // the audio engine's movie callback argument: when a stream is dropped
     for (;;) {
-        { static double nt; double tn = t768(); if (atomic_load(&g_hw768) && tn > 12 && tn >= nt) { if (!nt) fprintf(stderr, "[dm] 768 watchpoints on %#llx\n", (unsigned long long)atomic_load(&g_hw768)); nt = tn + 0.05; hw768_tick(); } }
+        { static double nt; double tn = t768(); static int hw = -1; if (hw < 0) { const char *e = getenv("DM_768"); hw = e && atoi(e) == 2; } if (hw && atomic_load(&g_hw768) && tn > 12 && tn >= nt) { if (!nt) fprintf(stderr, "[dm] 768 watchpoints on %#llx\n", (unsigned long long)atomic_load(&g_hw768)); nt = tn + 0.05; hw768_tick(); } }
         uint64_t cb = 0; if (cb_at && !vm_read_overwrite(mach_task_self(), cb_at, 8, (vm_address_t)&cb, &got) && cb != cb_old) { fprintf(stderr, "[dm] 768 audio callback argument [%.4fs] %#llx -> %#llx\n", t768(), (unsigned long long)cb_old, (unsigned long long)cb); cb_old = cb; }
         if (!atomic_load(&g_768_n)) { usleep(1000); continue; }
         for (int i = 0; i < W768; i++) {

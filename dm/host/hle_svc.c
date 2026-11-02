@@ -211,6 +211,12 @@ static void alias_initialize(uint64_t off, size_t size) {
         g_alias_exposed[h >> 6] |= UINT64_C(1) << (h & 63);
 }
 
+_Atomic uint64_t g_768_block;   // DIAGNOSTIC #768: the 64 KB block holding the crash object
+static void log768(const char *what, uint64_t a, uint64_t n, int64_t holes) {
+    uint64_t b = atomic_load(&g_768_block); if (!b || a >= b + 0x10000 || a + n <= b) return;
+    uint32_t thr_cur_handle(void); extern uint64_t g_t0_ns; uint64_t now_ns(void);
+    fprintf(stderr, "[dm] 768 %s covers block %#llx [%.4fs] T=%x: %#llx +%#llx, not mapped before %lld bytes, word %#llx\n", what, (unsigned long long)b, (now_ns() - g_t0_ns) / 1e9, thr_cur_handle(), (unsigned long long)a, (unsigned long long)n, (long long)holes, (unsigned long long)*(volatile uint64_t *)(b + 0x3000));
+}
 static int memory_contains(uint64_t base, uint64_t capacity, uint64_t addr, uint64_t size) {
     return addr >= base && size <= capacity && addr - base <= capacity - size;
 }
@@ -500,6 +506,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         dm_guest_write_prepare((void *)lo, hi - lo);
         memcpy((void *)dst, (void *)src, size);   // move semantics: the source region is not accessed while mapped (Horizon makes it inaccessible)
         map_add(dst, size, src, 0x0B /*MappedMemory*/);
+        log768("MapMemory source", src, size, 0);
         pthread_mutex_unlock(&g_map_lock);
         if (g_flag.svc) LOG("MapMemory %#llx <- %#llx +%#llx", dst, src, size);
         regs[0] = 0; return 0;
@@ -512,6 +519,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         int k = map_find(dst, size);
         if (!k || g_map[k - 1].base != dst || g_map[k - 1].size != size || g_map[k - 1].src != src) {
             pthread_mutex_unlock(&g_map_lock); LOG("UnmapMemory does not match a mapping %#llx+%#llx", dst, size); regs[0] = 0xD401; return 0; }
+        log768("UnmapMemory copy-back", src, size, 0);
         dm_guest_write_prepare((void *)src, size);
         memcpy((void *)src, (void *)dst, size);
         map_del(k - 1);
@@ -624,6 +632,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)a, hi = (uintptr_t)a + size;
         uintptr_t mlo = lo & ~(pg - 1), mhi = (hi + pg - 1) & ~(pg - 1);
         int commit = num == 0x2C;
+        log768(commit ? "MapPhysicalMemory" : "UnmapPhysicalMemory", a, size, need);
         int64_t changed = commit ? need : (int64_t)size - need;
         if (!commit) {
             if ((lo - mlo) / 4096 != (uint64_t)alias_unmapped(mlo - (uintptr_t)g_alias, lo - mlo)) mlo += pg;
