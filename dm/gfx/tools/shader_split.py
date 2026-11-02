@@ -2478,7 +2478,15 @@ def rpf6_files(files, mainnso):
     if not rpfs: return [], None
     img, lo, hi = uepak.nso_image(mainnso)
     key = rpf6.find_key(img, lo, hi, rpfs[0][0])
-    if not key: red('the RomFS has RPF6 archives, but no 32-byte window of main decrypts the first one\'s table of contents')
+    # 1.0.7's main holds a white-box cipher, no key; the archives are those of 1.0.0, whose main has it: another version extracted beside this one
+    if not key:
+        ver = os.path.dirname(os.path.dirname(os.path.abspath(mainnso))); root = os.path.dirname(ver)
+        for other in sorted(os.listdir(root)):
+            m = os.path.join(root, other, 'ExeFS', 'main')
+            if os.path.join(root, other) != ver and os.path.exists(m):
+                img, lo, hi = uepak.nso_image(m); key = rpf6.find_key(img, lo, hi, rpfs[0][0])
+                if key: print(f'RPF6 key: from the main of {other}', flush=True); break
+    if not key: red('the RomFS has RPF6 archives, but no 32-byte window of main decrypts the first one\'s table of contents (for a main that holds no key, extract a version that does beside it)')
     return rpfs, key
 
 def rpf6_shaders(path, rel, key, found):
