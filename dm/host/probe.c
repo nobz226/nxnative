@@ -408,7 +408,7 @@ static void *p768_run(void *p) {
     (void)p; uint64_t addr[W768] = {0}, old[W768] = {0}; int snaps = 0; unsigned logged = 0; vm_size_t got;
     uint64_t cb_at = 0, cb_old = 0; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) cb_at = (uint64_t)g_mod[i].base + 0x6dd53c0;   // the audio engine's movie callback argument: when a stream is dropped
     for (;;) {
-        { static double nt; double tn = t768(); static int hw = -1; if (hw < 0) { const char *e = getenv("DM_768"); hw = e && atoi(e) == 2; } if (hw && atomic_load(&g_hw768) && tn > 12 && tn >= nt) { if (!nt) fprintf(stderr, "[dm] 768 watchpoints on %#llx\n", (unsigned long long)atomic_load(&g_hw768)); nt = tn + 0.05; hw768_tick(); } }
+        { static double nt; double tn = t768(); static int hw = -1; if (hw < 0) { const char *e = getenv("DM_768"); hw = e && atoi(e) == 2; } if (hw && atomic_load(&g_hw768) && tn > 240 && tn >= nt) { if (!nt) fprintf(stderr, "[dm] 768 watchpoints on %#llx\n", (unsigned long long)atomic_load(&g_hw768)); nt = tn + 0.05; hw768_tick(); } }
         uint64_t cb = 0; if (cb_at && !vm_read_overwrite(mach_task_self(), cb_at, 8, (vm_address_t)&cb, &got) && cb != cb_old) { fprintf(stderr, "[dm] 768 audio callback argument [%.4fs] %#llx -> %#llx\n", t768(), (unsigned long long)cb_old, (unsigned long long)cb); cb_old = cb; }
         if (!atomic_load(&g_768_n)) { usleep(1000); continue; }
         for (int i = 0; i < W768; i++) {
@@ -418,7 +418,7 @@ static void *p768_run(void *p) {
             if (a != addr[i]) { addr[i] = a; old[i] = v; fprintf(stderr, "[dm] 768 poll %#llx [%.4fs] armed, value %#llx\n", (unsigned long long)a, t768(), (unsigned long long)v); continue; }
             if (v == old[i]) continue;
             int wiped = old[i] && !v; wiped |= module_of((void *)old[i]) && !module_of((void *)v);   // to zero, or a vtable overwritten
-            if (wiped && snaps++ < 12) { g_snap_all = 1; poll_snap(); g_snap_all = 0; }
+            if (wiped && snaps++ < 12 && !getenv("DM_768_NOSNAP")) { g_snap_all = 1; poll_snap(); g_snap_all = 0; }
             if (wiped || logged++ < 3000) { char x[64], y[64]; fprintf(stderr, "[dm] 768 poll %#llx [%.4fs] %s%s → %s\n", (unsigned long long)a, t768(), wiped ? "WIPED " : "", nu_mod(old[i], x, sizeof x), nu_mod(v, y, sizeof y)); }
             old[i] = v;
         }
