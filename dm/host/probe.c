@@ -130,6 +130,7 @@ static void nu_free(ucontext_t *uc) {
     uint64_t a = 0, b = 0, c = 0; rd64(p, &a); rd64(p + 8, &b); rd64(p + 16, &c); char w[140], l[64]; nu_callers(uc, w, sizeof w);
     fprintf(g_nu_f, "F %llx w %llx %llx %llx F%llu T%x lr %s %s\n", (unsigned long long)p, (unsigned long long)a, (unsigned long long)b, (unsigned long long)c, (unsigned long long)dm_guest_frame(), thr_cur_handle(), nu_mod(uc->uc_mcontext->__ss.__lr, l, sizeof l), w);
 }
+static int hw768_hit(ucontext_t *uc);
 static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the SIGTRAP branch of crash.c
     uint64_t pc = uc->uc_mcontext->__ss.__pc;
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
@@ -176,7 +177,7 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
         uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot;
         return 1;
     }
-    return 0;
+    return hw768_hit(uc);
 }
 static uint32_t *g_slots; static int g_slots_sealed;
 static void probe_add(module_t *m, uint64_t off, long dump, probe_fn fn) {
@@ -358,10 +359,12 @@ static void poll_snap(void) {
 static _Atomic uint64_t g_768[W768]; static _Atomic int g_768_n;
 static double t768(void) { extern uint64_t g_t0_ns; uint64_t now_ns(void); return (now_ns() - g_t0_ns) / 1e9; }
 static void w768_add(uint64_t a) { if (!a) return; int n = atomic_load(&g_768_n); for (int i = 0; i < W768; i++) if (atomic_load(&g_768[i]) == a) return; atomic_store(&g_768[n % W768], a); atomic_store(&g_768_n, n + 1); }
+static _Atomic uint64_t g_hw768;
 static void n768_stream(ucontext_t *uc, int reg, const char *what) {
     uint64_t t = uc->uc_mcontext->__ss.__x[reg], v70 = 0, v88 = 0, pend = 0, ring = 0, tmp = 0, tmpd = 0;
     rd64(t + 0x70, &v70); rd64(t + 0x88, &v88); rd64(t + 0x118, &pend); rd64(t + 0x38, &ring); rd64(t + 0xa0, &tmp); if (tmp) rd64(tmp + 0x28, &tmpd);
     fprintf(stderr, "[dm] 768 %s [%.4fs] T=%x stream %#llx vec70 %#llx vec88 %#llx pending %#llx ring %#llx temp %#llx\n", what, t768(), thr_cur_handle(), (unsigned long long)t, (unsigned long long)v70, (unsigned long long)v88, (unsigned long long)pend, (unsigned long long)ring, (unsigned long long)tmpd);
+    if (pend && !atomic_load(&g_hw768)) atomic_store(&g_hw768, pend + 0x1000);
     if (pend) { w768_add(pend + 0x1000); w768_add(pend + 0x1008); w768_add(pend + 0x2000); }   // the blocks after the pending buffer: the crash block is pending + 0x1000
 }
 static void n768_start(ucontext_t *uc) { n768_stream(uc, 19, "start"); }
@@ -369,10 +372,42 @@ static void n768_init(ucontext_t *uc) { n768_stream(uc, 19, "setup"); }
 static void n768_dtor(ucontext_t *uc) { n768_stream(uc, 22, "destructor"); }
 static int g_snap_all;
 static void poll_snap(void);
+// Hardware watchpoints on the crash block's first word and the next block's, set on every thread once the object exists (12 s in): no cost until a store reaches them. A hit logs the store and turns the watch off for
+// that thread so the store can run; the poll thread sets it again. A kernel or GPU write does not trigger it: then the poll sees the wipe with no hit before it
+static _Atomic uint64_t g_hw768; static _Atomic mach_port_t g_hit768[64]; static _Atomic int g_hitn768;
+static void hw768_set(thread_act_t th, int on) {
+    arm_debug_state64_t d; memset(&d, 0, sizeof d); uint64_t a = atomic_load(&g_hw768);
+    if (on && a) { uint64_t c = (0xffull << 5) | (2 << 3) | (2 << 1) | 1; d.__wvr[0] = a; d.__wcr[0] = c; d.__wvr[1] = a + 8; d.__wcr[1] = c; d.__wvr[2] = a + 0x1000; d.__wcr[2] = c; }
+    kern_return_t k = thread_set_state(th, ARM_DEBUG_STATE64, (thread_state_t)&d, ARM_DEBUG_STATE64_COUNT);
+    static int said; if (k && !said++) fprintf(stderr, "[dm] 768 [RED] thread_set_state debug: %d\n", k);
+}
+static int hw768_hit(ucontext_t *uc) {
+    uint64_t far = uc->uc_mcontext->__es.__far, a = atomic_load(&g_hw768), pc = uc->uc_mcontext->__ss.__pc;
+    if (!a || !(far >= a && far < a + 0x1008)) { uint32_t in = *(uint32_t *)pc; if ((in & 0xffe0001f) == 0xd4200000) return 0; if (!a) return 0; }
+    uint64_t ea = 0, wbv = 0; unsigned len = 0; int wb = -1; uint8_t data[64] = {0}; uint32_t in = *(uint32_t *)pc; int dec = watch_decode(uc, in, &ea, &len, data, &wb, &wbv); uint64_t v = 0; memcpy(&v, data, 8);
+    flockfile(stderr);
+    fprintf(stderr, "[dm] 768 HIT [%.4fs] T=%x far %#llx instruction %08x", t768(), thr_cur_handle(), (unsigned long long)far, in);
+    if (dec) fprintf(stderr, " store of %u bytes at %#llx value %#llx", len, (unsigned long long)ea, (unsigned long long)v);
+    watch_where("pc", pc); watch_where("lr", uc->uc_mcontext->__ss.__lr); fprintf(stderr, " x0=%#llx x1=%#llx x2=%#llx\n", (unsigned long long)uc->uc_mcontext->__ss.__x[0], (unsigned long long)uc->uc_mcontext->__ss.__x[1], (unsigned long long)uc->uc_mcontext->__ss.__x[2]);
+    dm_backtrace(uc->uc_mcontext->__ss.__fp);
+    funlockfile(stderr);
+    thread_act_t self = mach_thread_self(); hw768_set(self, 0); int n = atomic_fetch_add(&g_hitn768, 1); atomic_store(&g_hit768[n & 63], self);
+    return 1;
+}
+static void hw768_tick(void) {
+    static mach_port_t seen[512]; static int ns; thread_act_array_t ths; mach_msg_type_number_t nth = 0; thread_act_t me = mach_thread_self();
+    for (int k = 0; k < 64; k++) { mach_port_t h = atomic_exchange(&g_hit768[k], 0); if (h) for (int i = 0; i < ns; i++) if (seen[i] == h) seen[i] = 0; }
+    if (task_threads(mach_task_self(), &ths, &nth) != KERN_SUCCESS) return;
+    for (mach_msg_type_number_t i = 0; i < nth; i++) { int s = ths[i] == me; for (int j = 0; j < ns && !s; j++) s = seen[j] == ths[i];
+        if (!s) { hw768_set(ths[i], 1); int j = 0; while (j < ns && seen[j]) j++; if (j < 512) { seen[j] = ths[i]; if (j == ns) ns++; } } }
+    for (mach_msg_type_number_t i = 0; i < nth; i++) mach_port_deallocate(mach_task_self(), ths[i]);
+    vm_deallocate(mach_task_self(), (vm_address_t)ths, nth * sizeof *ths); mach_port_deallocate(mach_task_self(), me);
+}
 static void *p768_run(void *p) {
     (void)p; uint64_t addr[W768] = {0}, old[W768] = {0}; int snaps = 0; unsigned logged = 0; vm_size_t got;
     uint64_t cb_at = 0, cb_old = 0; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) cb_at = (uint64_t)g_mod[i].base + 0x6dd53c0;   // the audio engine's movie callback argument: when a stream is dropped
     for (;;) {
+        { static double nt; double tn = t768(); if (atomic_load(&g_hw768) && tn > 12 && tn >= nt) { if (!nt) fprintf(stderr, "[dm] 768 watchpoints on %#llx\n", (unsigned long long)atomic_load(&g_hw768)); nt = tn + 0.05; hw768_tick(); } }
         uint64_t cb = 0; if (cb_at && !vm_read_overwrite(mach_task_self(), cb_at, 8, (vm_address_t)&cb, &got) && cb != cb_old) { fprintf(stderr, "[dm] 768 audio callback argument [%.4fs] %#llx -> %#llx\n", t768(), (unsigned long long)cb_old, (unsigned long long)cb); cb_old = cb; }
         if (!atomic_load(&g_768_n)) { usleep(1000); continue; }
         for (int i = 0; i < W768; i++) {
