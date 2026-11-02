@@ -105,13 +105,16 @@ HLE_FORCE("_ZN2nn2oe15EnableRecordingEv", "video recording switch; the host has 
 //   aborts when it gets 0 (The Legend of Zelda: Breath of the Wild 1.9.0); SDK 16 did not check. Report a fixed non-zero ID, used only as an identifier
 HLE_FORCE("_ZN2nn6applet23GetAppletResourceUserIdEv", "applet resource user ID; the host returns a fixed non-zero value", uint64_t, h_applet_Aruid, void) { return 0x80; }
 // Launch parameter (present only when another program launched this one with one; returns bool): the host never passes one
-HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "launch parameter: none", unsigned, h_oe_PopLaunchParam, size_t *out, void *buf, size_t n) { (void)buf; (void)n; if (out) *out = 0; return 0; }
-// Tears of the Kingdom (SDK 20.5.22): the index of the program that launched this one in a multi-program application. The SDK asks the applet proxy, which the host never opens
-// (null read in applet::GetPreviousProgramIndex right after the window setup); -1 = launched from the home menu
-HLE_FORCE("_ZN2nn2oe23GetPreviousProgramIndexEv", "previous program index: launched from HOME, -1", int, h_oe_PrevProgram, void) { return -1; }
-// Launch another program of a multi-program application (Octopath Traveler 0 imports it); on hardware it does not return. The host has only this program: logged, and the game carries on
-HLE_FORCE("_ZN2nn2oe14ExecuteProgramEiPKvm", "launch another program of the application: the host runs only this one (logged)", void, h_oe_ExecProgram, int index, const void *param, size_t n) {
-    (void)param; LOG("[RED] oe::ExecuteProgram(%d, %zu bytes of parameters): the host runs only this program; the game carries on", index, n);
+// Launch parameter: none, unless DM_LAUNCH_PARAM gives one, popped once: the text, without a terminating zero, that the launching program would pass to oe::ExecuteProgram
+// (METAL GEAR SOLID 4, program 2 built on its own: "-region us -lan en -selfregion NA -resolution 0 -launcherpath 0", the English game)
+HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "launch parameter: none, or DM_LAUNCH_PARAM once", unsigned, h_oe_PopLaunchParam, size_t *out, void *buf, size_t n) {
+    static int popped;
+    const char *p = getenv("DM_LAUNCH_PARAM");
+    if (!p || !*p || popped) { if (out) *out = 0; return 0; }
+    size_t len = strlen(p); if (len > n) len = n;
+    memcpy(buf, p, len); if (out) *out = len; popped = 1;
+    LOG("oe::TryPopLaunchParameter: %zu bytes from DM_LAUNCH_PARAM: %.*s", len, (int)len, p);
+    return 1;
 }
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "video recording switch; the host has no system recording", void, h_oe_DisableRec, void) {}
 // Silence the game's sound in system video captures (through am; FINAL FANTASY RESONANCE imports both): the host records nothing

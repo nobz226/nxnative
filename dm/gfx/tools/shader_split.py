@@ -736,6 +736,24 @@ def pg_shader(d, label):
     if why: red(f'{label} ({st}): {why}')
     return [(f'{label}#PGSO', st, ctl, code)]
 
+def vpak_shaders(d, label):
+    """METAL GEAR SOLID 4 (Master Collection, program 2): common/shaders/vfp_Switch.<n>.pak, magic 'VPAK', u16 version 3. A hash table of shader names over a table of variants, then the
+    port's own containers, uncompressed: 'VSH\\x0c' / 'FSH\\x0c', each holding an NVN code area followed directly by its control section (0x880 bytes, control +0x704 = the code area's
+    length; not 16-byte aligned). Every control section is taken with the code area its +0x704 gives right before it, checked like any other shader; the duplicates go when the keys are made"""
+    out, bad = [], 0
+    for m in re.finditer(re.escape(CTL_MAGIC), d):
+        c = m.start()
+        if c + 0x708 > len(d): continue
+        nctl, ncode = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
+        if not (0x100 <= nctl <= 0x2000) or not (0x80 <= ncode <= c) or d[c - ncode:c - ncode + 4] != GFX_MAGIC: bad += 1; continue
+        ctl, code = d[c:c + nctl], d[c - ncode:c]
+        st = sph_stage(code)
+        why = check(f'{label}@{c:#x}', st, ctl, code) if st else 'no SPH stage'
+        if why: bad += 1; continue
+        out.append((f'{label}@{c:#x}#VPAK', st, ctl, code))
+    if bad: red(f'{label}: {bad} control sections without a matching code area before them (left out)')
+    return out
+
 def pg_sized_shader(d, label):
     """PlatinumGames' binding-table form: u32 prefix length (including itself), bindings, u32 code length, code, u32 control length, control. NieR:Automata's 1,371 objects in five DATs
     all have a 0x88-byte prefix and 0x880 control bytes; keys match the objects passed to NVN at boot. Recognize the section boundaries and NVN magics, without relying on a title or filename."""
@@ -2557,6 +2575,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == b'BERG':   # Snowdrop's SDF data slices: shader objects in individual compressed records
         with open(path, 'rb') as f: found += snowdrop_shaders(f.read(), '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == b'VPAK':   # METAL GEAR SOLID 4's shader archives (vpak_shaders)
+        found += vpak_shaders(open(path, 'rb').read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == MTARC:   # an MT Framework archive (mtarc_members): its shader package
         mtarc_shaders(open(path, 'rb').read(), '/' + rel, found)

@@ -50,9 +50,21 @@ static class P {
         // and the base game's Program NCA and the update's have the same title ID, so without the filter the update would be layered on itself or on the wrong base
         var basePkg = OpenNsp(ks, a[1], ContentMetaType.Application, app); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2], ContentMetaType.Patch, app | 0x800);
         Nca baseProg = Pick(basePkg, NcaContentType.Program) ?? throw new Exception("no Program NCA in the base NSP");
-        Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, baseProg.Header.TitleId) ?? throw new Exception("no Program NCA of the base game's program in the update NSP");
-        Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, baseProg.Header.TitleId);
-        Console.WriteLine($"title {baseProg.Header.TitleId:x16}" + (updProg != null ? $", update {updProg.Header.TitleId:x16}" : ""));
+        Nca updProg; ulong progId = baseProg.Header.TitleId;
+        // NX_PROGRAM_INDEX=<n>: program n of a multi-program application instead of program 0 (METAL GEAR SOLID 4 Master Collection: program 0 is the collection's launcher,
+        // which starts the game, program 2, with oe::ExecuteProgram). A program that only the update carries is a whole NCA there, but its data section is still
+        // patch-encrypted: it is layered over program 0's base NCA, and the RomFS hash check fails should any part really come from that base
+        string pi = Environment.GetEnvironmentVariable("NX_PROGRAM_INDEX");
+        if (!string.IsNullOrEmpty(pi) && pi != "0") {
+            ulong id = progId += ulong.Parse(pi);
+            Nca b = Pick(basePkg, NcaContentType.Program, id), u = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, id);
+            if (b == null && u == null) { if (updPkg == null) { Console.WriteLine($"program {pi} is not in the base NSP alone"); Environment.Exit(0); } throw new Exception($"no Program NCA of program {pi} ({id:x16}) in the base or update NSP"); }
+            Console.WriteLine($"program index {pi}: {id:x16}" + (b == null ? ", only in the update (layered over program 0)" : ""));
+            if (b != null) baseProg = b;
+            updProg = u;
+        } else updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, baseProg.Header.TitleId) ?? throw new Exception("no Program NCA of the base game's program in the update NSP");
+        Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, progId) ?? Pick(basePkg, NcaContentType.Control, progId);
+        Console.WriteLine($"title {progId:x16}" + (updProg != null ? $", update {updProg.Header.TitleId:x16}" : ""));
         string outDir = a[3], cmpDir = a.Length > 4 ? a[4] : null;
         if (ctrl != null) {   // control data (NACP): display version and game name; a raw copy goes to <output dir>/control.nacp for naming the app
             byte[] nacp = Nacp(ctrl);
