@@ -29,7 +29,7 @@
 # unless ALLOW_OTHER_METAL / --allow-other-metal. Issue #242 reported corruption with another compiler; the cause is still unconfirmed.
 # Python 3.12+ is required for bounded archive mappings inside images. The Python running this file needs lz4, capstone 5.x and fonttools (and backports.zstd before Python 3.14); also needed: Xcode, xcodegen, .NET SDK 10, zstd. SPIRV-Cross is the in-repo build. A first run takes 2 (Metroid Dread) to 10 minutes (Breath of the Wild: 5 of them the shader split), longer when shader libraries must be compiled; a repeat run with unchanged inputs takes about 20 s (Metroid Dread), mostly packing the IPA. Key values are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress). --progress json writes newline-delimited JSON events to stdout.
-import ast, collections, ctypes, errno, getpass, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
+import ast, collections, contextlib, ctypes, errno, getpass, pwd, hashlib, importlib.util, json, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dm/tools"))
 import romfs as rfs
@@ -427,11 +427,28 @@ def is_package(path):   # what nx_extract's OpenNsp opens: an XCI / XCZ by the c
     return h[:4] == b'PFS0' or h[0x100:] == b'HEAD'
 
 
-def title_of(path):   # the ticket name (the first 16 digits of the rights ID = title ID), else [title ID] in the file name
+def title_of(path, from_package=None):   # the ticket name (the first 16 digits of the rights ID = title ID), else [title ID] in the file name, else what the package itself says
     for n in pfs0_names(path):   # the ticket first: a file name's tag can be wrong (FFT's base NSP is tagged …0001, its ticket is …0000)
         if re.match(r'[0-9A-Fa-f]{32}\.tik$', n): return int(n[:16], 16)
     m = re.search(r'\[([0-9A-Fa-f]{16})\]', path.name)
-    return int(m.group(1), 16) if m else None
+    if m: return int(m.group(1), 16)
+    return from_package(path) if from_package else None   # an NSP without a ticket (a standard-crypto dump, a repack) and without a tag (LNPANDY/NX2Apple#177)
+
+
+@contextlib.contextmanager
+def package_title_reader(repo, keys, env):
+    """Yield a function path -> title ID read from the package's meta NCA with the keys (`nx_extract <keys> --title <package>`, header_key; the same for an NSP, NSZ, XCI and XCZ), None when
+    it cannot be read. nx_extract is built on the first call into a temporary folder: the work folder is named after the title ID, which is what is being looked for"""
+    with tempfile.TemporaryDirectory(prefix='title_probe_') as t:
+        work, nx = Path(t), []
+        def read(path):
+            if not nx: nx.append(build_nx_extract(repo, work, work / 'logs', env))
+            log = work / 'logs/title.log'
+            try: run([nx[0], keys, '--title', path], log, env=env, ok=(5,))
+            except BuildError: return None
+            m = re.search(r'^title ([0-9a-f]{16})$', log.read_text(errors='replace'), re.M)
+            return int(m.group(1), 16) if m else None
+        yield read
 
 
 def version_of(path):
@@ -442,9 +459,9 @@ def version_of(path):
 COMPRESSED = {'.nsz': '.nsp', '.xcz': '.xci'}   # nsz's compressed NSP / XCI and what nsz -D makes of them
 
 
-def scan_nsps(nsp_dir):
+def scan_nsps(nsp_dir, from_package=None):
     """Group by game: {application title ID: {'base': path, 'updates': [(version, path)], 'dlc': [(title ID, version, path)]}}. An NSZ / XCZ is listed as it is (its ticket names
-    the title as an NSP's does) and converted afterwards (decompress_nsz)"""
+    the title as an NSP's does) and converted afterwards (decompress_nsz). A package with neither is asked for its title ID: from_package(path) (package_title_reader)"""
     fams, unknown = {}, []
     for p in sorted([*nsp_dir.glob('*.nsp'), *nsp_dir.glob('*.xci'), *nsp_dir.glob('*.nsz'), *nsp_dir.glob('*.xcz')]):   # a base game may be a cartridge dump (.xci: Monster Hunter Rise); nx_extract reads its secure partition
         if p.name.startswith('._'): continue   # an AppleDouble file: on an exFAT / FAT drive macOS keeps a file's extended attributes (a download's quarantine flag) in `._<name>`, one beside each game file; is_package would skip it too, with a line for each
@@ -454,7 +471,7 @@ def scan_nsps(nsp_dir):
             say(f'skipping {p.name}: neither an NSP (PFS0) nor an XCI (HEAD at 0x100)'); continue
         if p.suffix in COMPRESSED and p.with_suffix(COMPRESSED[p.suffix]).exists():
             say(f'skipping {p.name}: {p.with_suffix(COMPRESSED[p.suffix]).name} is beside it'); continue
-        tid = title_of(p)
+        tid = title_of(p, from_package)
         if tid is None: unknown.append(p); continue
         low = tid & 0xFFF   # base …000, update …800, DLC = base + 0x1000 + index
         app = tid if low == 0 else tid & ~0xFFF if low == 0x800 else (tid & ~0xFFF) - 0x1000
@@ -1747,6 +1764,11 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False):
     ios, log = sh / 'ios', logs / 'dmsh_build.log'
     PROG.stage('Mac shaders' if mac else 'iOS shaders')
     chain = chain_of(repo)
+    stale = sorted(d.name for d in (sh / 'cache').glob('b-*') if d.name != f'b-{chain}' and any(d.glob('*_b.metallib'))
+                   ) + sorted(d.name for d in ios.glob('b-*') if d.name != f'b-{chain}' and any(d.glob('*_b.metallib')))
+    if stale: say(f'[NOTE] chain-changed: {", ".join(stale)} -> b-{chain}: the upstream update changed the shader '
+                  'translator, so the cached libraries cannot be reused and this build rebuilds them with it '
+                  '(once per update; later builds reuse as before)')
     out = sh / 'cache' if mac else ios
     libs, kf, kmac = out / f'b-{chain}', ios / f'b-{chain}.key', sh / f'mac-b-{chain}.key'
     pso_pairs = g.table('pso_pairs.tsv')
@@ -2090,6 +2112,7 @@ def parse_args(argv):
     ap.add_argument('-l', '--language', help='game language, a code or a name: ja, fr, de, es, it, nl, pt, ru, ko, zh-Hans, zh-Hant, en-GB, fr-CA, es-419, pt-BR, Japanese, ... (default: the LANGUAGE setting, else English); '
                     'it must be one the game supports, which the console lists')
     ap.add_argument('--keep-extracted', action=argparse.BooleanOptionalAction, help='keep the extracted game files after the IPA is built, for the next build (default: the KEEP_EXTRACTED setting, on)')
+    ap.add_argument('--work-dir', help='where the build folder goes (default: <NSP folder>/<title ID>_build); the extracted files, shader cache and temporary files all live there')
     ap.add_argument('--env-file', help='environment switches for a diagnostic build (one KEY=VALUE per line)')
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, g18p for a game whose profile sets pso_mtl4 on, else none). '
@@ -2202,10 +2225,51 @@ def main(args=None):
     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
+    # HOME and DOTNET_CLI_HOME for every child: a GUI launch (LaunchServices) can hand the app a
+    # process environment with HOME missing or empty, and .NET's first-run configure then builds a
+    # mutex path from "" and dies with 'NuGet-Migrations' + lstat("") == ENOENT — before any project
+    # is read (issue #10, where the app's own DOTNET_ROOT workaround did not help because the empty
+    # HOME came from the launch, not from the app). Derive it from the password database when the
+    # environment has nothing usable, so the pipeline is correct however it was started.
+    if not env.get('HOME') or not os.path.isdir(env['HOME']):
+        try: home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except Exception: home = Path.home()
+        if home.is_dir():
+            env['HOME'] = os.environ['HOME'] = str(home)
+            say(f'HOME: {home} (taken from the password database; the environment had none)')
+    env.setdefault('DOTNET_CLI_HOME', env['HOME'])   # .NET writes its first-run state here
+    # No first-run banner, no telemetry: a build neither wants nor reads either, and the telemetry
+    # call can hang the first run on a network that cannot reach Microsoft. setdefault, so a user
+    # who wants telemetry on keeps it.
+    env.setdefault('DOTNET_CLI_TELEMETRY_OPTOUT', '1')
+    env.setdefault('DOTNET_NOLOGO', '1')
     configure_dotnet(env)
+    xlate_bin = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'   # the fork's check of the root configure_dotnet chose (fork commit d0ed53df; the fork patch nsp-dotnet-root-verify)
+    def xlate_answers(root):
+        e = dict(env)
+        if root: e['DOTNET_ROOT'] = str(root)
+        else: e.pop('DOTNET_ROOT', None)
+        try:
+            r = subprocess.run([str(xlate_bin), '--source-sha'], capture_output=True, text=True, env=e, timeout=120)
+            return r.returncode == 0 and bool(r.stdout.strip())
+        except Exception:
+            return False
+    if xlate_bin.exists() and not xlate_answers(env.get('DOTNET_ROOT')):
+        cands = []
+        if dn := shutil.which('dotnet', path=env['PATH']):
+            real = Path(dn).resolve()
+            for base in (real.parent.parent, real.parent.parent.parent):
+                cands += [base / 'libexec', base]   # Homebrew's bin/../libexec; share/dotnet and aliases
+        cands += [Path.home() / '.dotnet', Path('/usr/local/share/dotnet'), Path('/opt/homebrew/opt/dotnet/libexec')]
+        if hit := next((c for c in cands if c.is_dir() and xlate_answers(c)), None):
+            env['DOTNET_ROOT'] = os.environ['DOTNET_ROOT'] = str(hit)
+            say(f'DOTNET_ROOT: {hit} (verified — the shader translator runs)')
+        elif env.get('DOTNET_ROOT'):
+            del env['DOTNET_ROOT']; os.environ.pop('DOTNET_ROOT', None)
+            say('DOTNET_ROOT: removed (none verified — the apphost searches its default locations)')
     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
     py = sys.executable
-    app, fam = scan_nsps(nsp_dir)
+    with package_title_reader(repo, keys, env) as from_package: app, fam = scan_nsps(nsp_dir, from_package)
     fam = decompress_nsz(nsp_dir, app, fam, keys, env)
     force =args.provisional or PROVISIONAL   # a provisional profile even when dm/games has one (testing the guesses)
     g, provisional, shadowed = None if force else gamemod.by_title(app), False, False
@@ -2249,10 +2313,12 @@ def main(args=None):
         if alias and not derived: derived = f'title {app:016X} is not game profile {g.id}\'s title {g.title_id:016X}'
         if derived: say(f'{derived}: packing {pkg_ver} from a profile derived from it')
     versions = [pkg_ver] if derived else need + ([pkg_ver] if pkg_ver not in need else [])
-    out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else nsp_dir / g.get('ipa')   # by default in the NSP folder, next to the NSPs and <id>_build/
+    work = Path(os.path.expanduser(args.work_dir)).resolve() if args.work_dir else nsp_dir / f'{g.id}_build'   # the folder holding the NSPs by default; --work-dir puts the build elsewhere
+    # out_ipa reads `work`, so `work` must be assigned first (upstream's order had them the other
+    # way round; the --work-dir patch moved `work` up here and this line had to follow it).
+    out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / g.get('ipa')   # by default next to the NSPs and <id>_build/
     if shadowed and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(out_ipa.stem + '-provisional.ipa')   # never over the IPA of the game's real profile
     if mac_pack and (args.out or OUT_IPA) and out_ipa.suffix != '.app': raise BuildError(f'the Mac app (-o / OUT_IPA) must end in .app: {out_ipa}')
-    work = nsp_dir / f'{g.id}_build'
     project = work / 'xcode/DmIOS.xcodeproj'
     workspace = Path(os.path.expanduser(args.xcode_workspace or XCODE_WORKSPACE)).resolve() if (args.xcode_workspace or XCODE_WORKSPACE) else nsp_dir.parent / 'NxNative.xcworkspace'
     if prepare_xcode and workspace.suffix != '.xcworkspace': raise BuildError('--xcode-workspace must end in .xcworkspace')
