@@ -362,7 +362,7 @@ static void n768_stream(ucontext_t *uc, int reg, const char *what) {
     uint64_t t = uc->uc_mcontext->__ss.__x[reg], v70 = 0, v88 = 0, pend = 0, ring = 0, tmp = 0, tmpd = 0;
     rd64(t + 0x70, &v70); rd64(t + 0x88, &v88); rd64(t + 0x118, &pend); rd64(t + 0x38, &ring); rd64(t + 0xa0, &tmp); if (tmp) rd64(tmp + 0x28, &tmpd);
     fprintf(stderr, "[dm] 768 %s [%.4fs] T=%x stream %#llx vec70 %#llx vec88 %#llx pending %#llx ring %#llx temp %#llx\n", what, t768(), thr_cur_handle(), (unsigned long long)t, (unsigned long long)v70, (unsigned long long)v88, (unsigned long long)pend, (unsigned long long)ring, (unsigned long long)tmpd);
-    w768_add(v70); w768_add(v88); w768_add(pend); w768_add(tmpd); if (ring) w768_add(ring + 0x3000);
+    if (pend) { w768_add(pend + 0x1000); w768_add(pend + 0x1008); w768_add(pend + 0x2000); }   // the blocks after the pending buffer: the crash block is pending + 0x1000
 }
 static void n768_start(ucontext_t *uc) { n768_stream(uc, 19, "start"); }
 static void n768_init(ucontext_t *uc) { n768_stream(uc, 19, "setup"); }
@@ -381,8 +381,8 @@ static void *p768_run(void *p) {
             if (vm_read_overwrite(mach_task_self(), a, 8, (vm_address_t)&v, &got) || got != 8) continue;
             if (a != addr[i]) { addr[i] = a; old[i] = v; fprintf(stderr, "[dm] 768 poll %#llx [%.4fs] armed, value %#llx\n", (unsigned long long)a, t768(), (unsigned long long)v); continue; }
             if (v == old[i]) continue;
-            int wiped = module_of((void *)old[i]) && !module_of((void *)v);
-            if (wiped && snaps++ < 6) { g_snap_all = 1; poll_snap(); g_snap_all = 0; }
+            int wiped = old[i] && !v; wiped |= module_of((void *)old[i]) && !module_of((void *)v);   // to zero, or a vtable overwritten
+            if (wiped && snaps++ < 12) { g_snap_all = 1; poll_snap(); g_snap_all = 0; }
             if (wiped || logged++ < 3000) { char x[64], y[64]; fprintf(stderr, "[dm] 768 poll %#llx [%.4fs] %s%s → %s\n", (unsigned long long)a, t768(), wiped ? "WIPED " : "", nu_mod(old[i], x, sizeof x), nu_mod(v, y, sizeof y)); }
             old[i] = v;
         }
