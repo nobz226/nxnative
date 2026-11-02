@@ -60,7 +60,6 @@ static uint64_t num(const char *v, uint64_t dflt) {
 #define DM_GAME_PAD_LAYOUT 0
 #define DM_GAME_OPMODE 1
 #define DM_GAME_PERF_BOOST 0
-#define DM_GAME_FEEDBACK_SNAP ""
 #define DM_GAME_TEX_FLUSH_UPLOAD 0
 #define DM_GAME_RENDER_COND 0
 #define DM_GAME_TEX_DIRTY_UPLOAD 0
@@ -95,7 +94,6 @@ static void defaults(void) {
     P.shared_font_ttf = -1;
 #endif
     P.pad_layout = DM_GAME_PAD_LAYOUT; P.opmode = DM_GAME_OPMODE; P.perf_boost = DM_GAME_PERF_BOOST;
-    copy_str(P.feedback_snap, sizeof P.feedback_snap, DM_GAME_FEEDBACK_SNAP);
     P.tex_flush_upload = DM_GAME_TEX_FLUSH_UPLOAD; P.render_cond = DM_GAME_RENDER_COND; P.tex_dirty_upload = DM_GAME_TEX_DIRTY_UPLOAD;
     P.tex_dyn_slots = DM_GAME_TEX_DYN_SLOTS; P.gpu_ts_segment = DM_GAME_GPU_TS_SEGMENT; P.vconv_range = DM_GAME_VCONV_RANGE;
 #ifdef DM_GAME_NVN_API_MAJOR
