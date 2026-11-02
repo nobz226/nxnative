@@ -11530,16 +11530,30 @@ static int fx_mode(void) {
     MLOG("present upscaling (DM_PRESENT_UPSCALE): %s", v ? "metalfx, MetalFX's spatial scaler where the picture is shown larger than the game renders it" : "off, bilinear");
     return g_fx_mode = v;
 }
+// DM_PRESENT_UPSCALE_LIMIT=1440 or 1080: MetalFX's output fits a 2560x1440 or 1920x1080 box, the picture's shape kept; the present pass stretches it the rest of the way bilinearly
+static void fx_limit(NSUInteger *w, NSUInteger *h) {
+    static int lim = -1;
+    if (lim < 0) {
+        const char *e = getenv("DM_PRESENT_UPSCALE_LIMIT"); int v = e ? atoi(e) : 0;
+        if (v != 1440 && v != 1080) { if (v) MLOG("[RED] DM_PRESENT_UPSCALE_LIMIT=%s: 1440, 1080 or 0; no limit", e); v = 0; }
+        if (v) MLOG("present upscaling limit (DM_PRESENT_UPSCALE_LIMIT): %dp", v);
+        lim = v;
+    }
+    if (!lim) return;
+    double s = fmin(lim * 16 / 9.0 / (double)*w, (double)lim / (double)*h);
+    if (s < 1) { *w = (NSUInteger)round((double)*w * s); *h = (NSUInteger)round((double)*h * s); }
+}
 // MetalFX scales the content (cw x ch) to its rectangle on the canvas (vp) when the rectangle is at least as large in both directions and larger in one
 static int fx_wanted(MTLViewport vp, NSUInteger cw, NSUInteger ch) {
     NSUInteger w = (NSUInteger)vp.width, h = (NSUInteger)vp.height;
     return cw && ch && w >= cw && h >= ch && (w > cw || h > ch);
 }
-// Encodes the upscale of the rectangle r of raw into cb (see above); returns the scaled picture, which the present pass draws 1:1 into vp, or nil (the bilinear pass).
+// Encodes the upscale of the rectangle r of raw into cb (see above); returns the scaled picture, which the present pass draws into vp (1:1 unless fx_limit made it smaller), or nil (the bilinear pass).
 // remake_wait: fx is the present thread's, whose textures presents still on the GPU may read: a new scaler waits for them and for FX_REMAKE_PRESENTS presents since the last
 static id<MTLTexture> fx_encode(fx_state *fx, id<MTL4CommandBuffer> cb, id<MTLTexture> raw, const NSUInteger r[4], MTLViewport vp, MTLPixelFormat out_pf, int remake_wait) {
     NSUInteger cw = r[2], ch = r[3], ow = (NSUInteger)vp.width, oh = (NSUInteger)vp.height;
-    if (fx_mode() != 1 || !fx_wanted(vp, cw, ch)) return nil;
+    fx_limit(&ow, &oh);
+    if (fx_mode() != 1 || !fx_wanted((MTLViewport){0, 0, (double)ow, (double)oh, 0, 1}, cw, ch)) return nil;
     if (!fx->sc || fx->in.width != cw || fx->in.height != ch || fx->in.pixelFormat != raw.pixelFormat || fx->out.width != ow || fx->out.height != oh || fx->out.pixelFormat != out_pf) {
         NSUInteger key[6] = {cw, ch, raw.pixelFormat, ow, oh, out_pf};
         if (!memcmp(key, fx->refused, sizeof key)) return nil;
