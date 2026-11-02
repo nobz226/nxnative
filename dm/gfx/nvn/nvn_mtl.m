@@ -4546,6 +4546,12 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
     d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    // DM_ANISO=2..16: at least that much anisotropic filtering on the game's mipmapped, linearly filtered samplers (surface textures seen at an angle: ground, walls).
+    // Samplers without mips (render targets, post-processing), with a depth compare (shadow maps) or a min / max reduction keep the game's value
+    static int aniso = -1;
+    if (aniso < 0) { const char *e = getenv("DM_ANISO"); aniso = e ? atoi(e) : 0; if (aniso > 16) aniso = 16; if (aniso >= 2) MLOG("anisotropic filtering at least %dx on mipmapped samplers (DM_ANISO)", aniso); else aniso = 0; }
+    if (aniso && d.mipFilter != MTLSamplerMipFilterNotMipmapped && d.minFilter == MTLSamplerMinMagFilterLinear && d.magFilter == MTLSamplerMinMagFilterLinear
+        && !p.cmp_mode && p.reduction != 1 && p.reduction != 2 && d.maxAnisotropy < (NSUInteger)aniso) d.maxAnisotropy = (NSUInteger)aniso;
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction
