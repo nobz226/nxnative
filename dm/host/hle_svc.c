@@ -516,6 +516,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         memcpy((void *)src, (void *)dst, size);
         map_del(k - 1);
         pthread_mutex_unlock(&g_map_lock);
+        { static int on = -1; if (on < 0) on = getenv("DM_768") != NULL; if (on) LOG("768 UnmapMemory %#llx -> %#llx +%#llx (copied back)", (unsigned long long)dst, (unsigned long long)src, (unsigned long long)size); }
         regs[0] = 0; return 0;
     }
     case 0x06: {  // QueryMemory(MemoryInfo* out, PageInfo* pout, addr) → x1 = pageinfo

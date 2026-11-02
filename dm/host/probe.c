@@ -325,6 +325,7 @@ static void *watch_arm(void *p) {
 // for a word that changes thousands of times before the bad store (Mario vs. Donkey Kong: a heap block's list link, rewritten by every allocation beside it, until 0x3f landed in it)
 static uint64_t g_poll, g_plen, g_pval; static int g_pwant;
 // All threads but this one stopped at once, then their pc, lr and 8 frame-pointer frames read and printed after they run again: the writer is caught a few microseconds after its store
+static int g_snap_all;
 static void poll_snap(void) {
     enum { MT = 256, NF = 8 }; static uint64_t fr[MT][NF + 2]; static thread_act_t keep[MT];
     thread_act_array_t ths; mach_msg_type_number_t nth = 0, ns = 0; thread_act_t self = mach_thread_self();
@@ -343,12 +344,50 @@ static void poll_snap(void) {
     flockfile(stderr);
     for (mach_msg_type_number_t i = 0; i < ns; i++) {   // threads with guest code anywhere in their first frames
         int guest = 0; for (int k = 0; k < NF + 2; k++) guest |= module_of((void *)fr[i][k]) != NULL;
-        if (!guest) continue;
+        if (!guest && !g_snap_all) continue;
         fprintf(stderr, "[dm] POLL thread %u:", i); watch_where("pc", fr[i][0]); watch_where("lr", fr[i][1]);
         for (int k = 2; k < NF + 2 && fr[i][k]; k++) watch_where("<", fr[i][k]);
         fputc('\n', stderr);
     }
     funlockfile(stderr);
+}
+// DIAGNOSTIC (issue #768, not for upstream): DM_768=1. Logs the movie audio stream's blocks at its start, setup and destructor (traps only on those rare paths, none on the allocator, whose traps hide the
+// crash), and when the audio thread takes a callback command; a host thread polls each block's first word and logs its changes. A word going from a pointer into a module (an object's vtable)
+// to anything else stops and prints every thread: the writer is still in the code that wrote
+#define W768 16
+static _Atomic uint64_t g_768[W768]; static _Atomic int g_768_n;
+static double t768(void) { extern uint64_t g_t0_ns; uint64_t now_ns(void); return (now_ns() - g_t0_ns) / 1e9; }
+static void w768_add(uint64_t a) { if (!a) return; int n = atomic_load(&g_768_n); for (int i = 0; i < W768; i++) if (atomic_load(&g_768[i]) == a) return; atomic_store(&g_768[n % W768], a); atomic_store(&g_768_n, n + 1); }
+static void n768_stream(ucontext_t *uc, int reg, const char *what) {
+    uint64_t t = uc->uc_mcontext->__ss.__x[reg], v70 = 0, v88 = 0, pend = 0, ring = 0, tmp = 0, tmpd = 0;
+    rd64(t + 0x70, &v70); rd64(t + 0x88, &v88); rd64(t + 0x118, &pend); rd64(t + 0x38, &ring); rd64(t + 0xa0, &tmp); if (tmp) rd64(tmp + 0x28, &tmpd);
+    fprintf(stderr, "[dm] 768 %s [%.4fs] T=%x stream %#llx vec70 %#llx vec88 %#llx pending %#llx ring %#llx temp %#llx\n", what, t768(), thr_cur_handle(), (unsigned long long)t, (unsigned long long)v70, (unsigned long long)v88, (unsigned long long)pend, (unsigned long long)ring, (unsigned long long)tmpd);
+    w768_add(v70); w768_add(v88); w768_add(pend); w768_add(tmpd); if (ring) w768_add(ring + 0x3000);
+}
+static void n768_start(ucontext_t *uc) { n768_stream(uc, 19, "start"); }
+static void n768_init(ucontext_t *uc) { n768_stream(uc, 19, "setup"); }
+static void n768_dtor(ucontext_t *uc) { n768_stream(uc, 22, "destructor"); }
+static int g_snap_all;
+static void poll_snap(void);
+static void *p768_run(void *p) {
+    (void)p; uint64_t addr[W768] = {0}, old[W768] = {0}; int snaps = 0; unsigned logged = 0; vm_size_t got;
+    uint64_t cb_at = 0, cb_old = 0; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) cb_at = (uint64_t)g_mod[i].base + 0x6dd53c0;   // the audio engine's movie callback argument: when a stream is dropped
+    for (;;) {
+        uint64_t cb = 0; if (cb_at && !vm_read_overwrite(mach_task_self(), cb_at, 8, (vm_address_t)&cb, &got) && cb != cb_old) { fprintf(stderr, "[dm] 768 audio callback argument [%.4fs] %#llx -> %#llx\n", t768(), (unsigned long long)cb_old, (unsigned long long)cb); cb_old = cb; }
+        if (!atomic_load(&g_768_n)) { usleep(1000); continue; }
+        for (int i = 0; i < W768; i++) {
+            uint64_t a = atomic_load(&g_768[i]), v = 0;
+            if (!a) continue;
+            if (vm_read_overwrite(mach_task_self(), a, 8, (vm_address_t)&v, &got) || got != 8) continue;
+            if (a != addr[i]) { addr[i] = a; old[i] = v; fprintf(stderr, "[dm] 768 poll %#llx [%.4fs] armed, value %#llx\n", (unsigned long long)a, t768(), (unsigned long long)v); continue; }
+            if (v == old[i]) continue;
+            int wiped = module_of((void *)old[i]) && !module_of((void *)v);
+            if (wiped && snaps++ < 6) { g_snap_all = 1; poll_snap(); g_snap_all = 0; }
+            if (wiped || logged++ < 3000) { char x[64], y[64]; fprintf(stderr, "[dm] 768 poll %#llx [%.4fs] %s%s → %s\n", (unsigned long long)a, t768(), wiped ? "WIPED " : "", nu_mod(old[i], x, sizeof x), nu_mod(v, y, sizeof y)); }
+            old[i] = v;
+        }
+    }
+    return NULL;
 }
 static void *poll_run(void *p) {
     (void)p; void svc_thread_dump(void); extern uint64_t g_t0_ns; uint64_t now_ns(void); vm_size_t got;
@@ -399,6 +438,9 @@ void probe_install(void) {
         if (mode & 1) { probe_add(nm, 0x392cf50, -1, nu_nop); probe_add(nm, 0x392d01c, -1, nu_nop); } if (mode & 2) probe_add(nm, 0x392eb40, -1, nu_nop); LOG("nu allocator hooks mode %d", mode); }
       if (nf && (g_nu_f = fopen(nf, "w"))) { setvbuf(g_nu_f, NULL, _IOLBF, 0); module_t *nm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) nm = &g_mod[i];
         probe_add(nm, 0x392cf50, -1, nu_enter); probe_add(nm, 0x392d01c, -1, nu_exit); probe_add(nm, 0x392eb40, -1, nu_free); LOG("nu allocator tracking on"); } }
+    if (getenv("DM_768")) { module_t *nm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) nm = &g_mod[i];
+        probe_add(nm, 0x36f603c, -1, n768_start); probe_add(nm, 0x36f63d0, -1, n768_init); probe_add(nm, 0x36ef7a0, -1, n768_dtor);
+        pthread_t t; pthread_create(&t, NULL, p768_run, NULL); pthread_detach(t); LOG("768 logging on"); }
     const char *e = getenv("DM_PROBE");
     if (e) {
         char spec[512]; strlcpy(spec, e, sizeof spec);
