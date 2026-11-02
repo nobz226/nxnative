@@ -72,6 +72,7 @@ General host and tool changes first needed here; each applies to every game:
 - **Invariant positions** (`-fpreserve-invariance` in `dmsh_build.py` and `ios_metal.py`): [Position invariance across shaders](../../../docs/reference/shaders.md#position-invariance-across-shaders).
 - **Full controller and six-axis histories**, **six-axis sensors and the shake** (`DM_BTN_SHAKE`), **SDK 7 start-up services**: [History reads fill every requested entry](../../../docs/reference/services.md#history-reads-fill-every-requested-entry), [Six-axis sensors](../../../docs/reference/services.md#six-axis-sensors), [SDK calls that open a system service through sm](../../../docs/reference/services.md#sdk-calls-that-open-a-system-service-through-sm).
 - **H.264 movies through VideoToolbox** (the `avcc` record, a presentation-order queue): described under [Movies](#movies); `hle_movie.c`.
+- **Resolved in synthetic regression: looping H.264 tutorial frame order** ([issue #889](https://github.com/seedds/nxnative/issues/889), source contributed by zatteogit): [H.264 loops retain presentation order when timestamps restart](../../../docs/reference/movies.md#h264-loops-retain-presentation-order-when-timestamps-restart). Current-main gameplay and playback-rate validation remain open; the regression uses synthetic packets and pixel buffers, with decompression substituted.
 - **Small host segments for small grants** (`hostseg_size`): [Host-lent command memory segments](../../../docs/reference/nvn-objects.md#host-lent-command-memory-segments).
 
 ## Open
