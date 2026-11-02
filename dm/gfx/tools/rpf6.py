@@ -9,7 +9,9 @@ Entries are not encrypted. No names are kept, so a file is recognised by its fir
 import concurrent.futures as cf, os, struct, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../tools'))
 import uepak
+from romfs import open   # the archives are inside the extraction's RomFS.img
 
 MAGIC, ROUNDS, AES_FLAG, COMPRESSED = b'RPF6', 16, 0xfffffffd, 0x40000000
 ZSTD = bytes.fromhex('28b52ffd')
