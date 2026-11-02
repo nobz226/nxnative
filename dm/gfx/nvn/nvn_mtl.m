@@ -390,7 +390,8 @@ void mtl_init(void) {
         const char *fp = getenv("DM_BOTW_FOOTPRINTS");
         if (fp && !strcmp(fp, "1")) { setenv("DM_NVN_FB_NODEPTH", "all", 1); setenv("DM_NVN_FB_STICKY", "f0e9530d6b9b759c", 1);
             setenv("DM_NVN_FB_SKIP", "14af5a4f8966d0d7,4d3d5a4408c2e8d9,753d0169ae3ce4f0,7636e1d2542c221a,eadbb36f187df11e,84862343ae82c6fa,217fcfcabf17fa70,0b6d8f4f993ae7ee,be431d4319d4cb1d,0bdc6f4d45124c83,4f929cbeba155ae0,2f177d69d90d6e54,8110c74078548172,2cf39271f4d646f8,a7efffcddd089278,d2fb4bd6fb340d1e,b2f5ae9ef79011b9,1632735280019270,9a39125242fe6572", 1); }
-        else if (fp && !strcmp(fp, "0")) { setenv("DM_NVN_FB_SKIP", "all", 1); setenv("DM_NVN_SKIP_FS", "f0e9530d6b9b759c", 1); setenv("DM_NVN_SKIP_FS_TID", "630", 1); }
+        // unset is Off too, as a front end removes a choice equal to the default; not over an env.txt setup of the same controls
+        else if (fp ? !strcmp(fp, "0") : ([[[NSBundle mainBundle] objectForInfoDictionaryKey:@"DMTitleID"] isEqual:@"01007EF00011E000"] && !getenv("DM_NVN_FB_SKIP") && !getenv("DM_NVN_FB_STICKY"))) { setenv("DM_NVN_FB_SKIP", "all", 1); setenv("DM_NVN_SKIP_FS", "f0e9530d6b9b759c", 1); setenv("DM_NVN_SKIP_FS_TID", "630", 1); }
     }
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
