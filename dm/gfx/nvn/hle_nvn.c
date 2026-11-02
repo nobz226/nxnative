@@ -10,6 +10,7 @@
 // Environment switches: DM_NVN_FRAMES=N prints the call table per frame for the first N frames (default 3); DM_NVN_TSV=path writes the per-frame call table and timing to a TSV (DM_NVN_TSV_CALLS=0 writes timing only); DM_SLOWFRAME=1 writes only the per-frame breakdown of dropped frames to the log; DM_NVN_LOG=1 logs object creation.
 #include "../../host/hle.h"
 #include "nvn_protos.h"
+void diag_capture_sampler(int sid, uint64_t out[2]);
 #include "nvn_count.h"
 #include "nvn_tex.h"
 #include "nvn_mtl.h"
@@ -2332,6 +2333,14 @@ NVN(nvnCommandBufferCallCommands, void, NVNcommandBuffer *c, int n, const NVNcom
 // Combined texture handle (texture id | sampler id << 20) is recorded into the texture slot as is: the replay layer takes the texture from the low 20 bits and the sampler from the high bits (nvn_mtl.m NVN_RB_SAMPT)
 // One combined handle: recorded as the hardware lays the command out, the handle 16 bytes in, where Luigi's Mansion 3 patches it after recording (nvn_obj.h p_bind_tex1)
 NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) {
+    static int snap_on = -1; if (snap_on < 0) snap_on = getenv("DM_NVN_SAMPLER_SNAPSHOT_PROBE") != NULL;
+    if(snap_on) {
+        typedef struct {p_bind_tex1 bind;uint64_t original,rid[2];} captured_bind;
+        captured_bind *snap=REC(c,OP_BIND_TEX1,captured_bind);
+        snap->bind=(p_bind_tex1){st,i,(uint64_t)h,CB(c)->tex_base,CB(c)->samp_base};snap->original=(uint32_t)h;
+        diag_capture_sampler(((uint32_t)h>>20)+CB(c)->samp_base,snap->rid);
+        return;
+    }
     p_bind_tex1 *r = REC(c, OP_BIND_TEX1, p_bind_tex1); *r = (p_bind_tex1){st, i, (uint64_t)h, CB(c)->tex_base, CB(c)->samp_base};
 }
 _Static_assert(offsetof(p_bind_tex1, h) == 8, "a single texture bind keeps its handle 16 bytes into the record (8 of header)");

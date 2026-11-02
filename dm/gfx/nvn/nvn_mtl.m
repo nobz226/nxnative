@@ -4289,6 +4289,17 @@ void mtl_reg_samp(int sid, const samp_par *sp) {
     g_sreg[id_] = *sp; g_sreg_ok[id_] = 1;
     os_unfair_lock_unlock(&g_rmu);
 }
+static id<MTLSamplerState> samp_by_id(int sid);
+// Experimental command-record lifetime probe, opt-in and not production semantics.
+void diag_capture_sampler(int sid,uint64_t out[2]) {
+    out[0]=out[1]=0;if(!g_dev || sid<=0)return;
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLSamplerState> m=sid<g_nsreg ? samp_by_id(sid) : nil;
+    static NSMutableDictionary<NSNumber *,id<MTLSamplerState>> *keep;
+    if(!keep)keep=[NSMutableDictionary new];
+    if(m) {out[0]=m.gpuResourceID._impl;keep[@(out[0])]=m;out[1]=out[0];}
+    os_unfair_lock_unlock(&g_rmu);
+}
 // Handles of deferred binds (BindTexturesDeferred) are read at execution: the record keeps the address of the handles (see hle_nvn.c); every reader of a bind record refreshes it first. Command memory is writable, so it is updated in place
 static inline void bh_fresh(const p_bind_handles *b) {
     if (b->defer && b->src && b->n > 0 && b->n <= 32) memcpy((void *)b->h, (const void *)(uintptr_t)b->src, 8 * (size_t)b->n);
@@ -4615,6 +4626,7 @@ static struct {
     NVNbufferRange vbuf[16];
     p_bind_buf ubo[6][16], ssbo[6][16];
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
+    uint64_t probe_samp[6][NTEX][2];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
     float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;   // alpha_ref: SetAlphaRef (at_bind)
@@ -6915,6 +6927,9 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             int sid = b->kind == NVN_RB_SAMPU ? ubo_samp_id(ubo_handle(nvn_stage, reg, b->off)) :
                       b->kind == NVN_RB_SAMPI ? (int)reg : b->kind == NVN_RB_SAMPT ? (reg < NTEX ? (int)(S.tex[nvn_stage][reg] >> 20) : 0) : reg < 128 ? (int)(S.samp[nvn_stage][reg] >> 20) : 0;   // SAMPI: a sampler ID the shader names as a constant
             __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
+            if(b->kind==NVN_RB_SAMPT && reg<NTEX && S.probe_samp[nvn_stage][reg][0] && (!strncmp(sh->key,"72f0bae5b9472e9a",16) || !strncmp(sh->key,"a8eb6b10519f8205",16) || !strncmp(sh->key,"70f9b39613952646",16) || !strncmp(sh->key,"cb449567b7a178fe",16))) {
+                slots[aid]=S.probe_samp[nvn_stage][reg][0];continue;
+            }
             slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
             USE(ss ? ss : dummy_samp(), MTLResourceUsageRead);
             if (bl && sid > 0) { int ok = sid < g_nsreg && g_sreg_ok[sid]; samp_par sp = ok ? g_sreg[sid] : (samp_par){0};   // g_rmu is already held in this section
@@ -7346,6 +7361,18 @@ static int state_op(uint32_t op, const void *a) {
                     MLOG("[RED] bind record at %p (pass %llu) holds count %d: overwritten after recording; bytes from -0x20: %s", a, g_stat_pass + 1, b->n, hx); }
                 break; }
             bh_fresh(b);
+            if(b->stage>=0 && b->stage<6 && b->first>=0 && b->n>0 && b->first+b->n<=NTEX) {
+                for(int i=0;i<b->n;i++) {
+                    uint64_t frozen[2]={0};
+                    const op_hdr *hdr=(const op_hdr *)((const uint8_t *)a-8);
+                    if(op==OP_BIND_TEX1 && hdr->size>=8+sizeof(p_bind_tex1)+24) {
+                        const uint64_t *extra=(const uint64_t *)((const uint8_t *)a+sizeof(p_bind_tex1));
+                        const p_bind_tex1 *single=a;
+                        if((uint32_t)single->h==(uint32_t)extra[0]) {frozen[0]=extra[1];frozen[1]=extra[2];}
+                    }
+                    if(memcmp(S.probe_samp[b->stage][b->first+i],frozen,sizeof frozen)) {memcpy(S.probe_samp[b->stage][b->first+i],frozen,sizeof frozen);g_args_dirty[b->stage]=1;}
+                }
+            }
             if (passdump()) for (int k = 0; k < b->n; k++) { int tid = (int)(b->h[k] & 0xfffff); if (tid) PD("T %llu bind st%d slot%d tid=%d sid=%d ser=%llu%s", g_stat_pass + 1, b->stage, b->first + k, tid, (int)(b->h[k] >> 20),
                 tid < g_ntreg ? g_treg[tid].t.serial : 0ull, b->defer ? " deferred" : ""); }
             if (b->stage < 6 && b->first + b->n <= NTEX && memcmp(&S.tex[b->stage][b->first], b->h, 8 * b->n)) { memcpy(&S.tex[b->stage][b->first], b->h, 8 * b->n); g_args_dirty[b->stage] = 1; } break; }
