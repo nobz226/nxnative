@@ -127,6 +127,10 @@ HLE_FORCE("_ZN2nn2oe29SetScreenShotImageOrientationENS_5album16ImageOrientationE
 static _Atomic int g_nosleep;
 HLE_FORCE("_ZN2nn2oe29BeginAutoSleepDisabledSectionEv", "open an auto-sleep disabled section (through am); the host never auto-sleeps, counted for the query", void, h_oe_NoSleepBegin, void) { g_nosleep++; }
 HLE_FORCE("_ZN2nn2oe27EndAutoSleepDisabledSectionEv", "close an auto-sleep disabled section (through am)", void, h_oe_NoSleepEnd, void) { if (g_nosleep > 0) g_nosleep--; }
+// The screen's backlight (am's SetLcdBacklighOffEnabled through the SDK's self controller, which the host's no-op oe::Initialize never made): the Mac's display is the system's.
+// Super Smash Bros. Ultimate turns it off after idling in its menus and on again at the next input; the SDK's version read the missing controller and crashed (null at sdk+0x32daa0)
+HLE_FORCE("_ZN2nn2oe21SwitchLcdBacklightOffEv", "turn the screen's backlight off (the Mac's display is left alone)", void, h_oe_LcdOff, void) { static int once; if (!once++) LOG("oe::SwitchLcdBacklightOff (ignored: the Mac's display is the system's)"); }
+HLE_FORCE("_ZN2nn2oe20SwitchLcdBacklightOnEv", "turn the screen's backlight on again", void, h_oe_LcdOn, void) { }
 HLE_FORCE("_ZN2nn2oe19IsAutoSleepDisabledEv", "whether an auto-sleep disabled section is open", unsigned, h_oe_NoSleepQ, void) { return g_nosleep > 0; }
 HLE_FORCE("_ZN2nn2oe37IsUserInactivityDetectionTimeExtendedEv", "whether the application requested an inactivity extension", unsigned, h_oe_InactivityExtQ, void) { return g_inactivity_mode != 0; }
 // Hyrule Warriors: Age of Calamity (SDK 9.6.0, main+0x8d1238): the copyright frame buffer, an overlay the system draws only into screenshots and recordings. The SDK hands the buffer to am as transfer memory
