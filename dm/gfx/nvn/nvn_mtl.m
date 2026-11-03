@@ -9456,7 +9456,13 @@ static int fb_mode(void) {
         if (g_fb_mode != 1) MLOG("same-pass feedback sampling snapshot: %s (DM_NVN_FB_SNAP)", g_fb_mode ? "a fresh one for every draw sampling an attachment of its pass" : "off"); }
     return g_fb_mode;
 }
-static int fb_depth_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FB_DEPTH"); v = !(e && !strcmp(e, "0")); } return v; }   // DM_NVN_FB_DEPTH=0: a draw samples its own depth attachment directly
+// A draw sampling its own pass's depth attachment reads a copy (below, in fb_prepare): on by default only for Donkey Kong Country: Tropical Freeze (#676), whose reads in place give
+// wrong tiles under Apple's lossless compression; elsewhere the read stays in place and in its pass. DM_NVN_FB_DEPTH=1 or 0 turns the copy on or off for any game
+static int g_fb_depth = -1;
+static int fb_depth_on(void) {
+    if (g_fb_depth < 0) { const char *e = getenv("DM_NVN_FB_DEPTH"); g_fb_depth = e && *e ? strcmp(e, "0") != 0 : DM_GAME_PROGRAM_ID == 0x0100C1F0051B6000ull; }
+    return g_fb_depth;
+}
 static inline void fb_pass_sync(void) { uint64_t p = g_stat_pass + !g_enc; if (p != g_fb_pass) { g_fb_pass = p; g_fb_wmask = g_fb_rmask = g_fb_dread = 0; } }
 static inline int fb_shape(const fb_cache_t *e, MTLPixelFormat pf, NSUInteger w, NSUInteger h) { return e->snap && e->snap.pixelFormat == pf && e->snap.width == w && e->snap.height == h; }
 static inline int fb_live(const fb_cache_t *e) { return e->ser && e->bar == g_fb_bar && e->sub == g_sub_serial; }   // a later draw may still reuse it
