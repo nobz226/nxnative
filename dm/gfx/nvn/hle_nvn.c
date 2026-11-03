@@ -891,12 +891,22 @@ NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t
     (void)m;
     CB(c)->ctl_size = n;   // The host's recordings contain no control-memory entries; the entire last block remains free.
 }
+// Super Smash Bros. Ultimate 13.0.5: its command memory callback (main+0x31be0) calls the allocator at callback data +0xd0 (command memory) or +0xd8 (control memory) without a null check.
+// Buffers the game sizes exactly have none there, as the Switch never runs them out, but the host's records are larger (backing out of the Spirits map called it and jumped to 0).
+// Such a callback is treated as absent: the record goes into a host-lent segment, as for a buffer without a callback. Matched by the function's first words, so no other game is affected
+static int cmd_cb_empty(const cmd_t *o) {
+    static const uint32_t smash_cb[8] = {0xd10083ff, 0xa9017bfd, 0x910043fd, 0xaa0303e0, 0x7100043f, 0xf90007e2, 0x54000080, 0x35000121};
+    module_t *m = module_of((const void *)o->cb);
+    if (!m || strcmp(m->name, "main") || (uintptr_t)o->cb - (uintptr_t)m->base != 0x31be0 || memcmp((const void *)o->cb, smash_cb, sizeof smash_cb)) return 0;
+    uint64_t f = 0; if (o->cb_data) memcpy(&f, (const uint8_t *)o->cb_data + 0xd0, 8);
+    return !f;
+}
 // Get space for one record and keep `keep` bytes after it (OP_RESERVE, 0 for the END); if not enough, call back into the game per the NVN convention to add command memory
 static uint8_t *cmd_alloc_keep(cmd_t *o, uint32_t size, uint32_t keep) {
     size = (size + 7) & ~7u;
     for (int tries = 0; !o->cur || o->cur + size + keep > o->end; tries++) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
-        if (!o->cb || tries == 2) {
+        if (!o->cb || tries == 2 || cmd_cb_empty(o)) {
             static int once; if (!once++) LOG("[nvn] command memory: the game's callback did not add enough (cb=%p, need %u bytes), using a host-lent segment", (void *)o->cb, size + keep);
             size_t sz = hostseg_size(o, 0, size + keep); cmd_new_segment(o, hostseg_take(o, sz), sz); break;
         }
