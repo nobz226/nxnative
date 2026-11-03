@@ -89,7 +89,7 @@ typedef struct {
     uint8_t *bgra; size_t bgra_cap;              // native-texture mode: the picture with red and blue swapped, for a BGRA8 / BGRX8 client texture (md_out_tex)
     // Vorbis: the identification and setup headers from Configure's MediaData ("csd-0", "csd-1", as with Android's MediaCodec), the decoder (opened at the first packet), channels / rate, Ogg page sequence
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
-    int16_t *hold; size_t hold_n, hold_cap; int vb_prev;   // decoded samples (interleaved values) not handed out yet, and the previous packet's blocksize, 0 at a stream's start (md_vorbis)
+    int16_t *hold; size_t hold_n, hold_cap; int vb_prev;   // decoded samples (interleaved values) not handed out yet, and the last packet's blocksize, 0 at a stream's start (md_vorbis)
     // AAC (Monster Hunter Rise's movies): AudioToolbox's converter, opened at the first packet from the AudioSpecificConfig (Configure's csd-0, kept in vhdr[0]); the packet being fed
     AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
@@ -321,8 +321,8 @@ static int md_vorbis_open(mdec_t *d) {
     LOG("[movie] Vorbis: %d channels %d Hz", d->ch, d->rate);
     return 1;
 }
-// one packet → PCM16 interleaved in the slot; returns 1 when there are samples (the first packet of a stream only primes the overlap and gives none)
-static int md_vorbis_emit(mdec_t *d, int slot, size_t vals) {   // up to vals kept values into the output slot; 0 when none are kept
+// Up to vals kept values go into the output slot; 0 when none are kept
+static int md_vorbis_emit(mdec_t *d, int slot, size_t vals) {
     if (vals > d->hold_n) vals = d->hold_n;
     if (!vals) return 0;
     size_t need = vals * sizeof *d->hold;
@@ -332,27 +332,33 @@ static int md_vorbis_emit(mdec_t *d, int slot, size_t vals) {   // up to vals ke
     if (d->hold_n) memmove(d->hold, d->hold + vals, d->hold_n * sizeof *d->hold);
     return 1;
 }
+// A packet's blocksize, from the mode number after its type bit (at most 6 bits, so within the first byte); 0 for a mode the stream does not have
+static int md_vorbis_blocksize(const stb_vorbis *f, const uint8_t *p, int n) {
+    if (n < 1) return 0;
+    int mode = p[0] >> 1 & ((1 << ilog(f->mode_count - 1)) - 1);
+    return mode < f->mode_count ? f->blocksize[f->mode_config[mode].blockflag] : 0;
+}
+// one packet → PCM16 interleaved in the slot; returns 1 when there are samples (the first packet of a stream only primes the overlap and gives none)
+// stb_vorbis ends a packet's samples at its window's right_start, which depends on the next window, while the specification ends them at the window's centre. With blocksizes 256 / 2048, a long window
+// before a short one gives 1,472 samples, not 1,024, and the short one 128, not 576. The total is the same, but an output no longer matches the time of the next packet, and Smash's movie player played
+// whole blocks of silence around each change. So the samples are kept here and each packet leaves with (previous blocksize + its blocksize) / 4 of them, as with Android's MediaCodec.
+// Samples still kept after the last packet lie past the centre of its window: the specification has none there, so they are dropped
 static int md_vorbis(mdec_t *d, const uint8_t *p, int n, int slot) {
     if (!d->vb && !md_vorbis_open(d)) return 0;
     if (n >= 65025) { if (!d->red_vb++) LOG("[RED] movie: Vorbis packet of %d bytes, larger than a page", n); return 0; }
     uint8_t *page = malloc((size_t)n + 27 + 255); if (!page) return 0;
     size_t len = ogg_page(d, page, p, n, 0);
+    int cur = md_vorbis_blocksize(d->vb, p, n), prev = d->vb_prev;
+    if (cur) d->vb_prev = cur;
     int ch = 0, ns = 0; float **pcm = NULL;
     stb_vorbis_decode_frame_pushdata(d->vb, page, (int)len, &ch, &pcm, &ns); free(page);
     if (ns <= 0 || ch <= 0 || !pcm) return 0;
     d->ogg_gran += ns;
     size_t vals = (size_t)ns * ch;
-    if (d->hold_cap < d->hold_n + vals) { d->hold_cap = d->hold_n + vals; d->hold = realloc(d->hold, d->hold_cap * sizeof *d->hold); }
+    if (d->hold_cap < d->hold_n + vals) { int16_t *h = realloc(d->hold, (d->hold_n + vals) * sizeof *h); if (!h) return 0; d->hold = h; d->hold_cap = d->hold_n + vals; }
     int16_t *o = d->hold + d->hold_n;
     for (int i = 0; i < ns; i++) for (int c = 0; c < ch; c++) { float v = pcm[c][i] * 32767.0f; o[i * ch + c] = (int16_t)(v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : v); }
-    d->hold_n += vals; d->ch = ch;
-    // stb_vorbis splits a stream at window changes differently from the specification: a long window before a short one gives 1,472 samples, not 1,024, and the short one 128, not 576 (blocksizes 256 / 2048).
-    // The total is the same, but an output no longer matches the time of the next packet, and Smash's movie player played whole blocks of silence around each change. So each packet leaves with
-    // (previous blocksize + its blocksize) / 4 samples, as with Android's MediaCodec. Its blocksize: only a short window gives blocksize_0 / 2 samples here
-    int bs0 = d->vhdr_n[0] >= 30 ? 1 << (d->vhdr[0][28] & 15) : 0, bs1 = d->vhdr_n[0] >= 30 ? 1 << (d->vhdr[0][28] >> 4) : 0;
-    if (!bs0) return md_vorbis_emit(d, slot, d->hold_n);
-    int cur = ns == bs0 / 2 ? bs0 : bs1, prev = d->vb_prev ? d->vb_prev : cur;
-    d->vb_prev = cur;
+    d->hold_n += vals;
     return md_vorbis_emit(d, slot, (size_t)((prev + cur) / 4) * ch);
 }
 // ---------- AAC ----------
@@ -480,7 +486,6 @@ static void md_pump(mdec_t *d) {
         // waits for it for good, so every picture leaves as a frame of the movie and an output without one ends it, as for VP9 and Baseline streams whose end-of-stream packet has no data
         if ((pk.size > 0 && (MD_VPX(d) || MD_AUDIO(d) || avc)) || (avc && eos)) {
             d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; d->jpts = pk.pts; d->jflush = avc && eos; md_job(d, MDJ_DECODE); got = d->jgot; }
-        if (eos && !got && d->type == MD_TYPE_VORBIS) got = md_vorbis_emit(d, slot, d->hold_n);   // what is left at the end of the stream
         int more = avc && eos && got;   // a picture in this output: the queued ones follow it, then the end-of-stream output (the drain)
         dm_host_mutex_lock(&d->mu);
         d->infree[d->ninfree++] = pk.in;
