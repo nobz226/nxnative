@@ -180,6 +180,7 @@ static int probe_hit(ucontext_t *uc) {   // Registered by probe_install with the
 }
 static uint32_t *g_slots; static int g_slots_sealed;
 static void probe_add(module_t *m, uint64_t off, long dump, probe_fn fn) {
+    if (!m) { LOG("[RED] probe: no such module"); return; }
     if (g_nprobe >= MAX_PROBE) die("too many probes");
     if (!g_slots) g_slots = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     uint64_t at = (uint64_t)m->base + off;
