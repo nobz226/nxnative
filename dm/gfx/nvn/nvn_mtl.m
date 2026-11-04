@@ -4290,6 +4290,7 @@ void mtl_reg_samp(int sid, const samp_par *sp) {
     os_unfair_lock_unlock(&g_rmu);
 }
 static id<MTLSamplerState> samp_by_id(int sid);
+__attribute__((weak)) uint64_t dm_guest_frame(void);   // hle_os.c; absent when graphics unit tests do not link the host
 // Experimental command-record lifetime probe, opt-in and not production semantics.
 void diag_capture_sampler(int sid,uint64_t out[2]) {
     out[0]=out[1]=0;if(!g_dev || sid<=0)return;
@@ -7368,7 +7369,10 @@ static int state_op(uint32_t op, const void *a) {
                     if(op==OP_BIND_TEX1 && hdr->size>=8+sizeof(p_bind_tex1)+24) {
                         const uint64_t *extra=(const uint64_t *)((const uint8_t *)a+sizeof(p_bind_tex1));
                         const p_bind_tex1 *single=a;
-                        if((uint32_t)single->h==(uint32_t)extra[0]) {frozen[0]=extra[1];frozen[1]=extra[2];}
+                        // Only for a bind recorded this frame or the last: a kept command buffer replayed frames later (Cap Kingdom's opening cutscene: the fog glowed white) reads the sampler the game set since
+                        uint64_t now=dm_guest_frame ? dm_guest_frame() : 0;
+                        if((uint32_t)single->h==(uint32_t)extra[0] && now-extra[2]<=1) frozen[0]=extra[1];
+                        else if((uint32_t)single->h==(uint32_t)extra[0]) { static int once; if(!once++) MLOG("sampler snapshot probe: a bind recorded at frame %llu replayed at %llu takes the current sampler",(unsigned long long)extra[2],(unsigned long long)now); }
                     }
                     if(memcmp(S.probe_samp[b->stage][b->first+i],frozen,sizeof frozen)) {memcpy(S.probe_samp[b->stage][b->first+i],frozen,sizeof frozen);g_args_dirty[b->stage]=1;}
                 }

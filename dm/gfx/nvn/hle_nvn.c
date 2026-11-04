@@ -2339,6 +2339,7 @@ NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, i
         captured_bind *snap=REC(c,OP_BIND_TEX1,captured_bind);
         snap->bind=(p_bind_tex1){st,i,(uint64_t)h,CB(c)->tex_base,CB(c)->samp_base};snap->original=(uint32_t)h;
         diag_capture_sampler(((uint32_t)h>>20)+CB(c)->samp_base,snap->rid);
+        snap->rid[1]=dm_guest_frame();   // the frame it was recorded in: a bind replayed later (a command buffer kept and resubmitted, as in cutscenes) takes the current sampler
         return;
     }
     p_bind_tex1 *r = REC(c, OP_BIND_TEX1, p_bind_tex1); *r = (p_bind_tex1){st, i, (uint64_t)h, CB(c)->tex_base, CB(c)->samp_base};
