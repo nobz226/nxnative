@@ -2333,7 +2333,7 @@ NVN(nvnCommandBufferCallCommands, void, NVNcommandBuffer *c, int n, const NVNcom
 // Combined texture handle (texture id | sampler id << 20) is recorded into the texture slot as is: the replay layer takes the texture from the low 20 bits and the sampler from the high bits (nvn_mtl.m NVN_RB_SAMPT)
 // One combined handle: recorded as the hardware lays the command out, the handle 16 bytes in, where Luigi's Mansion 3 patches it after recording (nvn_obj.h p_bind_tex1)
 NVN(nvnCommandBufferBindTexture, void, NVNcommandBuffer *c, NVNshaderStage st, int i, NVNtextureHandle h) {
-    static int snap_on = -1; if (snap_on < 0) snap_on = getenv("DM_NVN_SAMPLER_SNAPSHOT_PROBE") != NULL;
+    static int snap_on = -1; if (snap_on < 0) { const char *e = getenv("DM_NVN_SAMPLER_SNAPSHOT_PROBE"); snap_on = !(e && !strcmp(e, "0")); }   // on by default in this game's build (#612: bloom flicker); DM_NVN_SAMPLER_SNAPSHOT_PROBE=0 turns it off
     if(snap_on) {
         typedef struct {p_bind_tex1 bind;uint64_t original,rid[2];} captured_bind;
         captured_bind *snap=REC(c,OP_BIND_TEX1,captured_bind);
