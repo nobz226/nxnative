@@ -330,10 +330,15 @@ static geo_access geo_access_of(NvProg *pr, NvShader *gs) {
 // kernel (dmsh_geometry.lean) reads only the capture words it decides with, writes the viewport masks and its storage, and the
 // program's own vertex and fragment stages draw the kept primitives. Instanced or multi-invocation draws, vertex shaders with
 // storage writes (they would run twice) and transform feedback keep the full kernel and its reader. DM_NVN_GEO_LEAN=0 turns it off.
+// A geometry shader that picks the layer (its reader writes render_target_array_index) keeps them too: the program's vertex shader carries no layer, so every primitive went to layer 0.
+// Metroid Prime Remastered renders its runtime reflection cubes (128x128 RG11B10, 6 faces, 8 levels) in one layered pass through 7eff0a97951e2ec6 and c478a95ad65aa880: drawn lean,
+// faces 1-5 stayed empty and the gunship's hull reflected black whenever it read them (the landing, its sway before Samus jumps out)
 static NvShader *geo_lean_pick(NvProg *pr, NvShader *gs, int topology, int instances) {
     static int lean_on = -1; if (lean_on < 0) { const char *e = getenv("DM_NVN_GEO_LEAN"); lean_on = !(e && !strcmp(e, "0")); }
     NvShader *vs = pr->sh[0], *base = pr->sh[2];
     if (!lean_on || instances > 1 || (gs && gs->geo_invocations != 1) || base->geo_invocations != 1 || !vs || vs->discard_fn || S.tf_on || !pr->sh[1] || !(topology == 0 || topology == 1 || topology == 3)) return NULL;
+    if (!(base->geo_bg_tried & 0x80)) { base->geo_bg_tried |= 0x80; base->geo_bgv_v = shader_get([[[NSString stringWithUTF8String:base->key] substringToIndex:16] stringByAppendingString:@"_bgv"], 0); }
+    if (base->geo_bgv_v && base->geo_bgv_v->layer_out) return NULL;
     if (!(base->geo_lean_tried >> topology & 1)) {
         base->geo_lean_tried |= 1 << topology;
         NSString *key = [[NSString stringWithUTF8String:base->key] substringToIndex:16];
