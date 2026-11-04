@@ -1,6 +1,6 @@
 # Super Mario Odyssey (0100000000010000)
 
-Source: NX2Apple d9909881 (upstream a662f29e) + Sand Kingdom pipe fix 6fe1927e + #612 bloom sampler patch, ported (DM_NVN_SAMPLER_SNAPSHOT_PROBE=1 in env.txt turns it on) + anisotropic filtering
+Source: NX2Apple d9909881 (upstream a662f29e) + Sand Kingdom pipe fix 6fe1927e + #612 bloom sampler patch, ported (DM_NVN_SAMPLER_SNAPSHOT_PROBE=1 in env.txt turns it on; only for binds recorded this frame or the last, so the Cap Kingdom opening cutscene fog stays normal) + anisotropic filtering + H.264 fixes b5f200b0, f3551319
 
 - Shader chain of the app: f3ceca86cac5
 - Branch: game/0100000000010000 (feb69d88)
