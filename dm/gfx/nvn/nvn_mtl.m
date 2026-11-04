@@ -7548,14 +7548,25 @@ static void warm_start(void) {
     dispatch_queue_t q = dispatch_queue_create("dm.nvn.pso-warm", attr);
     dispatch_async(q, ^{ @autoreleasepool { long lines = 0; for (WarmTask *t in warm_parse(paths, &lines)) warm_task(t); warm_finish(); } });
 }
+// EQUAL against a DEPTH24 / DEPTH24_STENCIL8 buffer, which the host keeps as 32-bit float (Apple GPUs have no 24-bit depth): two coplanar surfaces drawn by different
+// shaders round to the same 24-bit value on the Switch and test equal, but keep their last float bits here. Metroid Prime Remastered draws the Frigate's floor edge strips
+// in its depth pre-pass, then colours them with EQUAL (df351b403930b318 after 2b16126b6ca22db0); a coplanar floor piece drawn later in the pre-pass left a float a few
+// ulps nearer, so scattered pixels of the strips failed and showed what was there before: flickering orange noise (also in Ryujinx on a Mac). Such a draw tests LEQUAL,
+// pulled two 24-bit steps towards the camera (a constant depth bias of -2: for float depth one unit is 2^(e-23), 2^-24 for depths in [0.5, 1)). DM_NVN_D24_EQUAL=0 turns it off
+static int d24_equal(void) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_D24_EQUAL"); on = !(e && !strcmp(e, "0")); }
+    if (!on || !S.ds.dt || S.ds.df != 3 || !R.rt.depth) return 0;
+    uint32_t f = R.rt.depth->d.format; return f == NVN_FORMAT_DEPTH24 || f == NVN_FORMAT_DEPTH24_STENCIL8;
+}
 static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
     struct { ds_st ds; uint32_t vm[2], wm[2]; int hd, hs; } k;
-    memset(&k, 0, sizeof k); k.ds = S.ds; memcpy(k.vm, S.st_vmask, 8); memcpy(k.wm, S.st_wmask, 8); k.hd = has_depth; k.hs = has_stencil;
+    int d24 = has_depth && d24_equal();
+    memset(&k, 0, sizeof k); k.ds = S.ds; memcpy(k.vm, S.st_vmask, 8); memcpy(k.wm, S.st_wmask, 8); k.hd = has_depth | d24 << 1; k.hs = has_stencil;
     if (!g_dss.klen) g_dss.klen = sizeof k;
     id<MTLDepthStencilState> s = hm_get_id(&g_dss, &k);
     if (s) return s;
     MTLDepthStencilDescriptor *d = [MTLDepthStencilDescriptor new];
-    if (has_depth && S.ds.dt) { d.depthCompareFunction = (MTLCompareFunction)(S.ds.df - 1); d.depthWriteEnabled = S.ds.dw; }
+    if (has_depth && S.ds.dt) { d.depthCompareFunction = d24 ? MTLCompareFunctionLessEqual : (MTLCompareFunction)(S.ds.df - 1); d.depthWriteEnabled = S.ds.dw; }
     if (has_stencil && S.ds.st) {
         MTLStencilDescriptor *f = [MTLStencilDescriptor new], *b = [MTLStencilDescriptor new];
         f.stencilCompareFunction = (MTLCompareFunction)(S.ds.sf_f - 1); f.stencilFailureOperation = (MTLStencilOperation)(S.ds.fail_f - 1);
@@ -10923,6 +10934,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       int wi = (S.poly.front == NVN_FRONT_FACE_CCW) != g_queue_origin_ll ? MTLWindingCounterClockwise : MTLWindingClockwise;   // NVN's raster flip is captured when the queue is initialized, rather than when the device origin changes.
       int fi = S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
       float bi[3] = {0, 0, 0}; if (S.poly.offset_en & 4) { bi[0] = S.po.units; bi[1] = S.po.factor; bi[2] = S.po.clamp; }
+      if (g_pass.hd && d24_equal()) bi[0] -= 2.0f;   // see d24_equal
       if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
       if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
       if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
