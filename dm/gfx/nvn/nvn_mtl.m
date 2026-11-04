@@ -4291,6 +4291,9 @@ void mtl_reg_samp(int sid, const samp_par *sp) {
 }
 static id<MTLSamplerState> samp_by_id(int sid);
 __attribute__((weak)) uint64_t dm_guest_frame(void);   // hle_os.c; absent when graphics unit tests do not link the host
+// DM_NVN_SAMPLER_SNAPSHOT_ALL: every shader by default (Sand Kingdom's ice glow flickered outside the four bloom shaders); 0 limits it to those four. DM_NVN_SAMPLER_SNAPSHOT_FRAMES=N lets a bind recorded up to N frames back keep its sampler (default 1, 0 = no limit)
+static int probe_all(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_SAMPLER_SNAPSHOT_ALL"); v = !(e && *e && atoi(e) == 0); if (!v) MLOG("sampler snapshot probe: the four bloom shaders only (DM_NVN_SAMPLER_SNAPSHOT_ALL=0)"); } return v; }
+static uint64_t probe_frames(void) { static long long v = -2; if (v == -2) { const char *e = getenv("DM_NVN_SAMPLER_SNAPSHOT_FRAMES"); v = e ? atoll(e) : 1; if (v < 0) v = 1; if (e) MLOG("sampler snapshot probe: binds up to %lld frames old keep their sampler (0 = any)", v); } return v ? (uint64_t)v : UINT64_MAX; }
 // Experimental command-record lifetime probe, opt-in and not production semantics.
 void diag_capture_sampler(int sid,uint64_t out[2]) {
     out[0]=out[1]=0;if(!g_dev || sid<=0)return;
@@ -6928,7 +6931,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             int sid = b->kind == NVN_RB_SAMPU ? ubo_samp_id(ubo_handle(nvn_stage, reg, b->off)) :
                       b->kind == NVN_RB_SAMPI ? (int)reg : b->kind == NVN_RB_SAMPT ? (reg < NTEX ? (int)(S.tex[nvn_stage][reg] >> 20) : 0) : reg < 128 ? (int)(S.samp[nvn_stage][reg] >> 20) : 0;   // SAMPI: a sampler ID the shader names as a constant
             __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
-            if(b->kind==NVN_RB_SAMPT && reg<NTEX && S.probe_samp[nvn_stage][reg][0] && (!strncmp(sh->key,"72f0bae5b9472e9a",16) || !strncmp(sh->key,"a8eb6b10519f8205",16) || !strncmp(sh->key,"70f9b39613952646",16) || !strncmp(sh->key,"cb449567b7a178fe",16))) {
+            if(b->kind==NVN_RB_SAMPT && reg<NTEX && S.probe_samp[nvn_stage][reg][0] && (probe_all() || !strncmp(sh->key,"72f0bae5b9472e9a",16) || !strncmp(sh->key,"a8eb6b10519f8205",16) || !strncmp(sh->key,"70f9b39613952646",16) || !strncmp(sh->key,"cb449567b7a178fe",16))) {
                 slots[aid]=S.probe_samp[nvn_stage][reg][0];continue;
             }
             slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
@@ -7371,7 +7374,7 @@ static int state_op(uint32_t op, const void *a) {
                         const p_bind_tex1 *single=a;
                         // Only for a bind recorded this frame or the last: a kept command buffer replayed frames later (Cap Kingdom's opening cutscene: the fog glowed white) reads the sampler the game set since
                         uint64_t now=dm_guest_frame ? dm_guest_frame() : 0;
-                        if((uint32_t)single->h==(uint32_t)extra[0] && now-extra[2]<=1) frozen[0]=extra[1];
+                        if((uint32_t)single->h==(uint32_t)extra[0] && now-extra[2]<=probe_frames()) frozen[0]=extra[1];
                         else if((uint32_t)single->h==(uint32_t)extra[0]) { static int once; if(!once++) MLOG("sampler snapshot probe: a bind recorded at frame %llu replayed at %llu takes the current sampler",(unsigned long long)extra[2],(unsigned long long)now); }
                     }
                     if(memcmp(S.probe_samp[b->stage][b->first+i],frozen,sizeof frozen)) {memcpy(S.probe_samp[b->stage][b->first+i],frozen,sizeof frozen);g_args_dirty[b->stage]=1;}
