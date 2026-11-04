@@ -7552,11 +7552,28 @@ static void warm_start(void) {
 // shaders round to the same 24-bit value on the Switch and test equal, but keep their last float bits here. Metroid Prime Remastered draws the Frigate's floor edge strips
 // in its depth pre-pass, then colours them with EQUAL (df351b403930b318 after 2b16126b6ca22db0); a coplanar floor piece drawn later in the pre-pass left a float a few
 // ulps nearer, so scattered pixels of the strips failed and showed what was there before: flickering orange noise (also in Ryujinx on a Mac). Such a draw tests LEQUAL,
-// pulled two 24-bit steps towards the camera (a constant depth bias of -2: for float depth one unit is 2^(e-23), 2^-24 for depths in [0.5, 1)). DM_NVN_D24_EQUAL=0 turns it off
+// pulled two 24-bit steps towards the camera (a constant depth bias of -2: for float depth one unit is 2^(e-23), 2^-24 for depths in [0.5, 1)), for the listed colour shaders (d24_listed). DM_NVN_D24_EQUAL=0 turns it off
+static int g_d24_geo_ok;   // the current draw may use the loosened EQUAL (d24_geo_note, d24_listed)
 static int d24_equal(void) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_D24_EQUAL"); on = !(e && !strcmp(e, "0")); }
-    if (!on || !S.ds.dt || S.ds.df != 3 || !R.rt.depth) return 0;
+    if (!on || !S.ds.dt || S.ds.df != 3 || !R.rt.depth || !g_d24_geo_ok) return 0;
     uint32_t f = R.rt.depth->d.format; return f == NVN_FORMAT_DEPTH24 || f == NVN_FORMAT_DEPTH24_STENCIL8;
+}
+// Only the colour shaders that need it take the loosened test: geometry drawn in the pre-pass with an alpha cut-out (Tallon Overworld's grass: depth 4b87459ed2e526f3,
+// colour 3f975e2ebb19e9c8 with no cut-out of its own) relies on its cut-out edges failing EQUAL against what lies behind, and drawn loosened its edges took the
+// texture's transparent black. The floor edge strips' pre-pass shader has the same cut-out (bc7e3ae479c4bffa), so the draw itself cannot tell the two apart: the list
+// names the strips' colour shaders (Metroid Prime Remastered by default; DM_NVN_D24_EQUAL_FS=<fragment key>,... for any game, at most 16)
+static int d24_listed(const NvProg *pr) {
+    static char ks[16][17]; static int nk = -1;
+    if (nk < 0) { nk = 0; const char *e = getenv("DM_NVN_D24_EQUAL_FS");
+        if (!e && DM_GAME_PROGRAM_ID == 0x010012101468C000ull) e = "df351b403930b318,ed1880daaac65284,3fea8a8743e29d5c,7f9167125b398f59,7d733a1eb2ad42d2,5c25e61e96ba3f09";
+        for (const char *q = e; q && *q && nk < 16; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 16) n = 16; memcpy(ks[nk], q, n); ks[nk++][n] = 0; } }
+    for (int i = 0; i < nk && pr && pr->sh[1]; i++) if (!strncmp(pr->sh[1]->key, ks[i], strlen(ks[i]))) return 1;
+    return 0;
+}
+static void d24_geo_note(const p_draw *dw, const p_draw_idx *di, NvProg *pr) {   // before each draw's depth state (draw_): decides g_d24_geo_ok
+    (void)dw; (void)di; int ok = d24_listed(pr);
+    if (ok != g_d24_geo_ok) { g_d24_geo_ok = ok; g_dss_dirty = 1; }
 }
 static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
     struct { ds_st ds; uint32_t vm[2], wm[2]; int hd, hs; } k;
@@ -10900,6 +10917,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (ps != g_enc_pso) { enc_r_pso(en, ps); g_enc_pso = ps; }
     if (g_sm_pass && g_sm_applied != g_sm_cur) {   // the layer this draw goes to (see g_sm_plan)
         MTLVertexAmplificationViewMapping vm = {0, (uint32_t)(g_sm_cur - g_sm_lo)}; [(id<MTL4RenderCommandEncoder>)en setVertexAmplificationCount:1 viewMappings:&vm]; g_sm_applied = g_sm_cur; }
+    d24_geo_note(dw, di, pr);   // see d24_equal
     static id<MTLDepthStencilState> cur_ds; static uint64_t cur_ds_pass;
     // Diagnostic DM_NVN_DEPTHOVR=fragment shader key prefix,...: those draws compare depth with ALWAYS, which tells "the depth test rejects every fragment" from "nothing rasterizes" (with DM_NVN_HILITE); unset = unchanged
     static char dko[8][24]; static int ndko = -1;
