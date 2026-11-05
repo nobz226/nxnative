@@ -172,6 +172,25 @@ template<typename V, typename T, typename... A> static inline __attribute__((alw
     return r;
 }}
 '''
+def input_select(msl):
+    """A fragment shader's inputs read through a computed index (spirv-cross copies the stage_in array into a local spvUnsafeArray and indexes it, `_31[int(_47)][_51]`) are
+    read by selection instead. On an M2 the indexed read of the interpolated copy gave values that differed from a direct read of the same slot, so Metroid Prime Remastered's
+    floor edge strips (bc7e3ae479c4bffa, an alpha cut-out in the depth pre-pass whose texture coordinate slot comes from a constant) cut their mask in the wrong places and left a
+    black bar between the two orange lines. The selection reads every slot by a constant index, as the direct read does"""
+    arrs = set(re.findall(r'spvUnsafeArray<float4, \d+> (_\d+) = \{\};\n\s+\1\[0\] = in\.', msl))
+    if not arrs: return msl
+    n = 0
+    def rep(m):
+        nonlocal n
+        if m.group(1) not in arrs: return m.group(0)
+        n += 1; return f'dm_inr({m.group(1)}, int({m.group(2)}))'
+    out = re.sub(r'(_\d+)\[int\((_\d+)\)\]', rep, msl)
+    if not n: return msl
+    helper = ('template<typename A> static inline __attribute__((always_inline)) float4 dm_inr(thread const A& a, int i)   // an input read through a computed index (input_select)\n'
+              '{\n    float4 r = a[0];\n    for (int k = 1; k < 16; k++) r = i == k ? a[k] : r;\n    return r;\n}\n')
+    i = out.find('\nfragment ')
+    return out if i < 0 else out[:i + 1] + helper + out[i + 1:]
+
 def border_emu(msl):
     """The samples of the argument buffer's textures through its sampler members, T.sample(S, args) → dm_bs(T.sample(S, args), block, bit, T, S_w, args) (see BORDER_HELPERS);
     the source unchanged when it samples through none. Only samples of float textures: an integer texture is not filtered, and its border colour is Maxwell's integer one, which
@@ -1278,6 +1297,7 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    if j['stage'] == 'ps': src = input_select(src)   # inputs read through a computed index (see input_select)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
     mesh = j.get('mesh_stage')

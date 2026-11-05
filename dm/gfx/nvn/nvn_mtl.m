@@ -7563,22 +7563,31 @@ static int d24_equal(void) {
 // colour 3f975e2ebb19e9c8 with no cut-out of its own) relies on its cut-out edges failing EQUAL against what lies behind, and drawn loosened its edges took the
 // texture's transparent black. The floor edge strips' pre-pass shader has the same cut-out (bc7e3ae479c4bffa), so the draw itself cannot tell the two apart: the list
 // names the strips' colour shaders (Metroid Prime Remastered by default; DM_NVN_D24_EQUAL_FS=<fragment key>,... for any game, at most 16)
-static int d24_listed(const NvProg *pr) {
-    static char ks[16][17]; static int nk = -1;
-    if (nk < 0) { nk = 0; const char *e = getenv("DM_NVN_D24_EQUAL_FS");
-        if (!e && DM_GAME_PROGRAM_ID == 0x010012101468C000ull) e = "df351b403930b318,ed1880daaac65284,3fea8a8743e29d5c,7f9167125b398f59,7d733a1eb2ad42d2,5c25e61e96ba3f09";
-        for (const char *q = e; q && *q && nk < 16; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 16) n = 16; memcpy(ks[nk], q, n); ks[nk++][n] = 0; } }
-    for (int i = 0; i < nk && pr && pr->sh[1]; i++) if (!strncmp(pr->sh[1]->key, ks[i], strlen(ks[i]))) return 1;
+static int d24_in(const NvProg *pr, const char *env, const char *dflt, char (*ks)[17], int *nk) {
+    if (*nk < 0) { *nk = 0; const char *e = getenv(env); if (!e && DM_GAME_PROGRAM_ID == 0x010012101468C000ull) e = dflt;
+        for (const char *q = e; q && *q && *nk < 16; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 16) n = 16; memcpy(ks[*nk], q, n); ks[(*nk)++][n] = 0; } }
+    for (int i = 0; i < *nk && pr && pr->sh[1]; i++) if (!strncmp(pr->sh[1]->key, ks[i], strlen(ks[i]))) return 1;
     return 0;
 }
+static int d24_listed(const NvProg *pr) { static char ks[16][17]; static int nk = -1;
+    return d24_in(pr, "DM_NVN_D24_EQUAL_FS", "df351b403930b318,ed1880daaac65284,3fea8a8743e29d5c,7f9167125b398f59,7d733a1eb2ad42d2,5c25e61e96ba3f09", ks, &nk); }
+// The pre-pass shaders of those draws (DM_NVN_D24_TAG_FS; Prime: the strips' alpha cut-out bc7e3ae479c4bffa) mark the pixels they write in stencil bit 0x80, which the game's
+// stencil use leaves free (it clears all bits each frame and tests bit 0x1), and the loosened colour draws pass only there: the strip's cut-out middle, where the pre-pass discarded
+// and the floor lies behind, fails as with the exact EQUAL and shows the floor (drawn loosened without the mark it took the texture's transparent black)
+static int d24_tagger(const NvProg *pr) { static char ks[16][17]; static int nk = -1; return d24_in(pr, "DM_NVN_D24_TAG_FS", "bc7e3ae479c4bffa", ks, &nk); }
+enum { D24_TAG = 0x80 };
+static int g_d24_tag;   // the current draw writes the mark (1) or tests it (2), with the loosened EQUAL (d24_geo_note)
 static void d24_geo_note(const p_draw *dw, const p_draw_idx *di, NvProg *pr) {   // before each draw's depth state (draw_): decides g_d24_geo_ok
     (void)dw; (void)di; int ok = d24_listed(pr);
-    if (ok != g_d24_geo_ok) { g_d24_geo_ok = ok; g_dss_dirty = 1; }
+    int d24 = R.rt.depth && (R.rt.depth->d.format == NVN_FORMAT_DEPTH24 || R.rt.depth->d.format == NVN_FORMAT_DEPTH24_STENCIL8);
+    int tag = !d24 || S.ds.st || !g_pass.hs ? 0 : ok && S.ds.dt && S.ds.df == 3 ? 2 : S.ds.dt && S.ds.dw && d24_tagger(pr) ? 1 : 0;
+    if (ok != g_d24_geo_ok || tag != g_d24_tag) { g_d24_geo_ok = ok; g_d24_tag = tag; g_dss_dirty = 1; }
 }
 static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
     struct { ds_st ds; uint32_t vm[2], wm[2]; int hd, hs; } k;
-    int d24 = has_depth && d24_equal();
-    memset(&k, 0, sizeof k); k.ds = S.ds; memcpy(k.vm, S.st_vmask, 8); memcpy(k.wm, S.st_wmask, 8); k.hd = has_depth | d24 << 1; k.hs = has_stencil;
+    int d24 = has_depth && d24_equal(), tag = has_stencil && !S.ds.st ? g_d24_tag : 0;
+    if (tag == 2 && !d24) tag = 0;
+    memset(&k, 0, sizeof k); k.ds = S.ds; memcpy(k.vm, S.st_vmask, 8); memcpy(k.wm, S.st_wmask, 8); k.hd = has_depth | d24 << 1; k.hs = has_stencil | tag << 1;
     if (!g_dss.klen) g_dss.klen = sizeof k;
     id<MTLDepthStencilState> s = hm_get_id(&g_dss, &k);
     if (s) return s;
@@ -7593,6 +7602,11 @@ static id<MTLDepthStencilState> dss_get(int has_depth, int has_stencil) {
         b.depthFailureOperation = (MTLStencilOperation)(S.ds.zfail_b - 1); b.depthStencilPassOperation = (MTLStencilOperation)(S.ds.zpass_b - 1);
         b.readMask = S.st_vmask[1]; b.writeMask = S.st_wmask[1];
         d.frontFaceStencil = f; d.backFaceStencil = b;
+    } else if (tag) {   // see d24_tagger
+        MTLStencilDescriptor *t = [MTLStencilDescriptor new];
+        if (tag == 1) { t.stencilCompareFunction = MTLCompareFunctionAlways; t.depthStencilPassOperation = MTLStencilOperationReplace; t.readMask = 0; t.writeMask = D24_TAG; }
+        else { t.stencilCompareFunction = MTLCompareFunctionEqual; t.readMask = D24_TAG; t.writeMask = 0; }
+        d.frontFaceStencil = t; d.backFaceStencil = t;
     }
     s = [g_dev newDepthStencilStateWithDescriptor:d];
     hm_put_id(&g_dss, &k, s);
@@ -10927,7 +10941,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
         unsigned df0 = (unsigned)S.ds.df; if (ovr) S.ds.df = 8; cur_ds = dss_get(g_pass.hd, g_pass.hs); S.ds.df = df0; cur_ds_pass = g_pass.serial; g_dss_dirty = 0; }
     else if (g_dss_dirty || cur_ds_pass != g_pass.serial) { cur_ds = dss_get(g_pass.hd, g_pass.hs); cur_ds_pass = g_pass.serial; g_dss_dirty = 0; }
     if (cur_ds != g_enc_dss) { enc_r_dss(en, cur_ds); g_enc_dss = cur_ds; }
-    { uint32_t sr = S.st_ref[0];   // enc_r_stencil_ref sends the front value only
+    { uint32_t sr = g_d24_tag && !S.ds.st && g_pass.hs ? D24_TAG : S.st_ref[0];   // enc_r_stencil_ref sends the front value only; D24_TAG: see d24_tagger
       if (!(g_ed.ok & ED_SREF) || g_ed.sref != sr) { enc_r_stencil_ref(en, sr, sr); g_ed.sref = sr; g_ed.ok |= ED_SREF; } }
     // Viewport / scissor (clamped within the target size)
     NSUInteger tw = g_pass.tw, th = g_pass.th;
@@ -10952,7 +10966,11 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       int wi = (S.poly.front == NVN_FRONT_FACE_CCW) != g_queue_origin_ll ? MTLWindingCounterClockwise : MTLWindingClockwise;   // NVN's raster flip is captured when the queue is initialized, rather than when the device origin changes.
       int fi = S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
       float bi[3] = {0, 0, 0}; if (S.poly.offset_en & 4) { bi[0] = S.po.units; bi[1] = S.po.factor; bi[2] = S.po.clamp; }
-      if (g_pass.hd && d24_equal()) bi[0] -= 2.0f;   // see d24_equal
+      // see d24_equal and d24_tagger: the marking pre-pass draw wins its ties with the coplanar floor drawn before it (on the Switch both round to the same 24-bit value), pulled m
+      // 24-bit steps nearer; the colour draw, 2m nearer, then passes over what that draw wrote. DM_NVN_D24_BIAS=<24-bit steps> (default 2)
+      { static float m = -1; if (m < 0) { const char *e = getenv("DM_NVN_D24_BIAS"); m = e ? (float)atof(e) : 2.0f; if (m < 0) m = 0; }
+        float steps = g_pass.hd && d24_equal() ? 2 * m : g_pass.hd && g_d24_tag == 1 && !S.ds.st ? m : 0;
+        if (steps > 0) bi[0] -= steps; }
       if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
       if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
       if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
