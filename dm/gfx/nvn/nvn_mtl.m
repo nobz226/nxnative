@@ -7555,7 +7555,7 @@ static void warm_start(void) {
 // pulled two 24-bit steps towards the camera (a constant depth bias of -2: for float depth one unit is 2^(e-23), 2^-24 for depths in [0.5, 1)), for the listed colour shaders (d24_listed). DM_NVN_D24_EQUAL=0 turns it off
 static int g_d24_geo_ok;   // the current draw may use the loosened EQUAL (d24_geo_note, d24_listed)
 static int d24_equal(void) {
-    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_D24_EQUAL"); on = !(e && !strcmp(e, "0")); }
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_D24_EQUAL"); on = e && atoi(e) > 0; }   // off by default: the strips' real cause was their pre-pass input read (dmsh_build.py input_select); DM_NVN_D24_EQUAL=1 turns this on
     if (!on || !S.ds.dt || S.ds.df != 3 || !R.rt.depth || !g_d24_geo_ok) return 0;
     uint32_t f = R.rt.depth->d.format; return f == NVN_FORMAT_DEPTH24 || f == NVN_FORMAT_DEPTH24_STENCIL8;
 }
@@ -7564,7 +7564,7 @@ static int d24_equal(void) {
 // texture's transparent black. The floor edge strips' pre-pass shader has the same cut-out (bc7e3ae479c4bffa), so the draw itself cannot tell the two apart: the list
 // names the strips' colour shaders (Metroid Prime Remastered by default; DM_NVN_D24_EQUAL_FS=<fragment key>,... for any game, at most 16)
 static int d24_in(const NvProg *pr, const char *env, const char *dflt, char (*ks)[17], int *nk) {
-    if (*nk < 0) { *nk = 0; const char *e = getenv(env); if (!e && DM_GAME_PROGRAM_ID == 0x010012101468C000ull) e = dflt;
+    if (*nk < 0) { *nk = 0; const char *e = getenv(env); (void)dflt;   // no game list by default (see d24_equal)
         for (const char *q = e; q && *q && *nk < 16; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 16) n = 16; memcpy(ks[*nk], q, n); ks[(*nk)++][n] = 0; } }
     for (int i = 0; i < *nk && pr && pr->sh[1]; i++) if (!strncmp(pr->sh[1]->key, ks[i], strlen(ks[i]))) return 1;
     return 0;
