@@ -1,6 +1,6 @@
 # Metroid Prime Remastered (010012101468C000)
 
-Source: Nobz main 8a40ffcc (upstream + our fixes, 2026-11-03) + light grid float view (a214d993) + sparse 3D tile shape (67ed43b9) + layered geometry keeps its reader (e962a3cf): the gunship lit (#783) + EQUAL on emulated D24 depth (floor edge strips without noise)
+Source: Nobz main 8a40ffcc (upstream + our fixes, 2026-11-03) + light grid float view (a214d993) + sparse 3D tile shape (67ed43b9) + layered geometry keeps its reader (e962a3cf): the gunship lit (#783) + EQUAL on emulated D24 depth, strips only, marked in stencil + fragment inputs by selection (input_select): floor edge strips as on the Switch
 
 - Shader chain of the app: b-6b71f2c7dcb8
 - Branch: game/010012101468C000
