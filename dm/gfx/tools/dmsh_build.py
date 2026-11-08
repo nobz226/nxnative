@@ -191,6 +191,28 @@ def input_select(msl):
     i = out.find('\nfragment ')
     return out if i < 0 else out[:i + 1] + helper + out[i + 1:]
 
+def input_interp(msl, rec):
+    """Fragment inputs take the interpolation the shader's own header (SPH words 6..13, Ryujinx ShaderHeader.ImapTypes) gives them. The translator decorates each input from that
+    header, but an input it declares as one array (a shader that reads its inputs through a computed index, see input_select) gets one qualifier for all of them: none. An integer
+    a vertex shader passes as float bits then arrives interpolated, and Apple GPUs flush such a small value (a denormal) to 0. Metroid Prime Remastered's actor shaders
+    (9c9444f4ec498073 and 1,711 others) take an object's lighting record by an index the header marks constant (flat): every object read record 0, the first object visible
+    that frame, so a bomb-slot wall in the Chozo Ruins switched between bright and dark as the camera turned (also in Ryujinx). Each user input without a qualifier gets flat
+    (constant) or center_no_perspective (screen linear) from the header; perspective needs none. Maxwell pixel shaders only (an NVN2 record has another header)"""
+    ci = rec.find(bytes.fromhex('34127698'))
+    if ci < 0 or dmsh_ampere.is_nvn2(rec[ci:]): return msl
+    code = rec[0x38:ci]
+    if len(code) < 0x80: return msl
+    sph = struct.unpack_from('<20I', code, 0x30)
+    if sph[0] & 0x1f != 2: return msl   # not a pixel shader header
+    st = re.search(r'struct main0_in\s*\{.*?\};', msl, re.S)
+    if not st: return msl
+    def q(m):
+        loc = int(m.group(2)); im = sph[6 + (loc >> 2)] >> ((loc & 3) * 8) & 0xff
+        first = next((t for t in (im & 3, im >> 2 & 3, im >> 4 & 3, im >> 6 & 3) if t), 0)
+        return m.group(0) if first not in (1, 3) else f'{m.group(1)}[[user(locn{loc}), {"flat" if first == 1 else "center_no_perspective"}]]'
+    body = re.sub(r'(\b\w+ )\[\[user\(locn(\d+)\)\]\]', q, st.group(0))
+    return msl[:st.start()] + body + msl[st.end():]
+
 def border_emu(msl):
     """The samples of the argument buffer's textures through its sampler members, T.sample(S, args) → dm_bs(T.sample(S, args), block, bit, T, S_w, args) (see BORDER_HELPERS);
     the source unchanged when it samples through none. Only samples of float textures: an integer texture is not filtered, and its border colour is Maxwell's integer one, which
@@ -1297,7 +1319,7 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
-    if j['stage'] == 'ps': src = input_select(src)   # inputs read through a computed index (see input_select)
+    if j['stage'] == 'ps': src = input_interp(input_select(src), rec_of(key)[1])   # inputs read through a computed index, and the header's flat / linear inputs (see input_select, input_interp)
     src = border_emu(src); open(msl, 'w').write(src)   # border colours Metal lacks (see border_emu)
     first, spill = [], 0
     mesh = j.get('mesh_stage')
