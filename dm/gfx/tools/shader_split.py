@@ -566,6 +566,21 @@ def pg_shader(d, label):
     if why: red(f'{label} ({st}): {why}')
     return [(f'{label}#PGSO', st, ctl, code)]
 
+def rgxd_records(d, label):
+    """RAGE's shader records (Red Dead Redemption): {u32 0x19866891, u32 code length, u32 control length}, then the code area, then the control section; the GLSLC magic, but no
+    GLSLC output. In the rgxd effects of the RPF6 archives (3,352) and in main (its built-in shaders: the boot screen's among them)"""
+    out = []
+    for m in re.finditer(b'\x91\x68\x86\x19', d):
+        c0 = m.start()
+        if c0 + 12 > len(d): continue
+        ncode, nctl = struct.unpack_from('<II', d, c0 + 4)
+        code, ctl = d[c0 + 12:c0 + 12 + ncode], d[c0 + 12 + ncode:c0 + 12 + ncode + nctl]
+        if len(code) != ncode or len(ctl) != nctl or code[:4] not in (GFX_MAGIC, CS_MAGIC) or ctl[:4] != CTL_MAGIC: continue
+        st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code)
+        if not st or check(f'{label}@{c0:#x}', st, ctl, code): continue
+        out.append((f'{label}@{c0:#x}#RGXD', st, ctl, code))
+    return out
+
 def rpf6_shaders(path, rel, out):
     """Red Dead Redemption: RAGE RPF6 archives (big-endian header {'RPF6', entry count, debug data offset / 8, encryption}, the table at +0x10: count × 20 bytes rounded up to 16,
     encrypted with the game's white-box cipher). The decrypted table comes from the game's own cipher run in the Mac host (DM_RPF_DECRYPT, dm/host/hle_rpf.c), as <name>.toc in
@@ -577,22 +592,21 @@ def rpf6_shaders(path, rel, out):
     zs = zstd_mod(); bad = 0
     for i in range(min(n, len(t) // 20)):
         h, size, off, fl, _ = struct.unpack_from('>5I', t, 20 * i)
+        size &= 0x7fffffff   # the top bit flags a resource of two parts (shaders.rpf: 4 entries), each its own zstd frame
         if off & 0x80000000 or not size or off * 8 + size > len(a): continue
         d = a[off * 8:off * 8 + size]
         if d[:4] == ZSTD_MAGIC:
+            parts = [d[m.start():] for m in re.finditer(re.escape(ZSTD_MAGIC), d)]   # one frame or several back to back
             try: d = zs.decompress(d)
-            except Exception: bad += 1; continue
+            except Exception:
+                got = []
+                for k, part in enumerate(parts):
+                    try: got.append(zs.ZstdDecompressor().decompress(part))
+                    except Exception: pass
+                if not got: bad += 1; continue
+                d = b''.join(got)
         lab = f'/{rel}/{h:08x}'
-        # RAGE's rgxd effects: each shader is {u32 0x19866891, u32 code length, u32 control length}, then the code area, then the control section (the GLSLC magic, but no GLSLC output)
-        for m in re.finditer(b'\x91\x68\x86\x19', d):
-            c0 = m.start()
-            if c0 + 12 > len(d): continue
-            ncode, nctl = struct.unpack_from('<II', d, c0 + 4)
-            code, ctl = d[c0 + 12:c0 + 12 + ncode], d[c0 + 12 + ncode:c0 + 12 + ncode + nctl]
-            if len(code) != ncode or len(ctl) != nctl or code[:4] not in (GFX_MAGIC, CS_MAGIC) or ctl[:4] != CTL_MAGIC: continue
-            st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code)
-            if not st or check(f'{lab}@{c0:#x}', st, ctl, code): bad += 1; continue
-            out.append((f'{lab}@{c0:#x}#RGXD', st, ctl, code))
+        out.extend(rgxd_records(d, lab))
     if bad: red(f'/{rel}: {bad} entries not decompressed (not a plain zstd frame)')
 
 def vpak_shaders(d, label):
@@ -1821,8 +1835,17 @@ def main():
             try: common = unityfs.common_strings(img)
             except ValueError: common = None   # not a Unity game
         found = []; scan_blob(img, 'main' + ('@' + tag if tag else ''), found)
-        found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
+        found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False) or rgxd_records(img, 'main' + ('@' + tag if tag else ''))
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
+        # Shaders the game builds at run time from a template in main and that no file holds (Red Dead Redemption's 2 boot-screen shaders, filled in at run time): saved by the host
+        # as <key>.ctl + <key>.code (DM_NVN_SHDUMP) into <version dir>/nvn_capture, read here as they are
+        nc = os.path.join(os.path.dirname(os.path.abspath(romfs)), 'nvn_capture')
+        if os.path.isdir(nc):
+            for k in sorted(f[:-4] for f in os.listdir(nc) if f.endswith('.ctl')):
+                if not os.path.isfile(os.path.join(nc, k + '.code')): continue
+                ctl, code = open(os.path.join(nc, k + '.ctl'), 'rb').read(), open(os.path.join(nc, k + '.code'), 'rb').read()
+                st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code)
+                if st and not check(f'nvn_capture/{k}', st, ctl, code): found.append((f'nvn_capture/{k}#CAPTURE', st, ctl, code))
         found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c for _, _, c, _ in found})
         # GLSLC outputs the game compiles at run time, captured on the Mac (hle_glslc.c): <version dir>/glslc_capture, or DM_GLSLC_CAPTURE. A game needs them when main holds GLSL sources and
         # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
