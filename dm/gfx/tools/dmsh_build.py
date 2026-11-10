@@ -44,6 +44,9 @@ PRE_STATS = collections.Counter()
 # -fpreserve-invariance: vertex positions are marked [[invariant]], but without this flag Metal does not promise that two different shaders compute the same expression to the same value; on Maxwell the same multiply-adds always agree.
 # Super Mario Odyssey draws a depth pre-pass with alRenderDepthOnly, then the G-buffer with another vertex shader and depth test less-or-equal: a hair off and the test failed, leaving those pixels with old content (Cap Kingdom's ground in 32x32 blocks)
 MAC_METAL = ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fpreserve-invariance']
+# Profile key shader_math relaxed: compile with -fmetal-math-mode=relaxed, as the iOS libraries are (ios_metal.py). The default fast mode lets the compiler assume there is no NaN / Inf and drop
+# the isnan selects that reproduce Maxwell's NaN results. Red Dead Redemption's vegetation wrote NaN into its RG11B10 targets, and bloom and depth of field spread it into flickering black squares
+if any(k == 'shader_math' and v[:1] == ['relaxed'] for k, v in GAME.rows): MAC_METAL.append('-fmetal-math-mode=relaxed')
 MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
 def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
     subprocess.run([*MAC_METAL, msl, '-o', air], check=True)
