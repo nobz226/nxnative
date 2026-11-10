@@ -1306,7 +1306,9 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)],
         logs / 'shader_split.log', env=env)
     m = re.search(r'shaders: (\d+) \(', (logs / 'shader_split.log').read_text(errors='replace'))
-    if m and m.group(1) == '0':   # dmsh_build.py would make no library, and the iOS shader step stop with no word of why
+    if m and m.group(1) == '0' and os.environ.get('NX_ALLOW_NO_SHADERS') == '1':   # a boot without shaders, to study the game (Red Dead Redemption's encrypted RPF6 archives)
+        say('[RED] no shaders found; packing on without them (NX_ALLOW_NO_SHADERS=1): the game draws nothing')
+    elif m and m.group(1) == '0':   # dmsh_build.py would make no library, and the iOS shader step stop with no word of why
         raise BuildError('the shader split found no shaders in main or the RomFS: the game keeps them in a form shader_split.py does not read; locate them (docs/agents) and add a reader')
     # pso_pairs.tsv (the pairs of agl BAHS program variations, which only the pipeline prebuild reads): checked like the others where the profile has one; else kept beside the
     # package (pso_pairs_path), so a profile made before the table existed still packs and its prebuild still gets the pairs

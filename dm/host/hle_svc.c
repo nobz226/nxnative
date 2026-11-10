@@ -28,6 +28,17 @@ static uint8_t *g_stack; static size_t g_stack_cap;
 int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < RESERVE; }
 
 static void *alias_windows_thread(void *arg);
+// DM_MEMDUMP=<seconds>:<file>: that many seconds after the address space is set up, the used part of the guest heap is written to <file> (a study aid: Red Dead Redemption decrypts
+// its RPF6 archive tables at boot with a key found nowhere in its files, so its key schedule is looked for in memory)
+static void *memdump_thread(void *arg) {
+    const char *e = arg; unsigned secs = (unsigned)atoi(e); const char *path = strchr(e, ':'); if (!path) return NULL; path++;
+    sleep(secs);
+    size_t n = atomic_load(&g_heap_cur);
+    FILE *f = fopen(path, "wb"); if (!f) { LOG("[RED] DM_MEMDUMP: cannot write %s", path); return NULL; }
+    size_t w = fwrite(g_heap, 1, n, f); fclose(f);
+    LOG("DM_MEMDUMP: %zu bytes of the guest heap (at %p) written to %s after %u s", w, g_heap, path, secs);
+    return NULL;
+}
 static void mem_init_once(void) {
     size_t pg = (size_t)getpagesize();
     if (RESERVE < 0x10000000 || DM_GAME_MEM_ALIAS > RESERVE - 0x10000000 ||
@@ -48,6 +59,8 @@ static void mem_init_once(void) {
     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)RESERVE, g_heap, g_alias, g_stack);
+    const char *md = getenv("DM_MEMDUMP");
+    if (md && strchr(md, ':')) { pthread_t th; if (!pthread_create(&th, NULL, memdump_thread, (void *)md)) pthread_detach(th); }
     const char *aw = getenv("DM_ALIAS_WINDOWS");
     if (aw && atoi(aw) > 0) { pthread_t th; if (!pthread_create(&th, NULL, alias_windows_thread, (void *)(uintptr_t)atoi(aw))) pthread_detach(th); }
 }
