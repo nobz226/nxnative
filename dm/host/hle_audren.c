@@ -436,7 +436,10 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
         Result res2 = orig(sys, o, on, p, pn, in, inn); last_r2 = atomic_load(&g_renders2); return res2;
     }
     uint64_t u = atomic_fetch_add(&g_updates, 1) + 1, r = atomic_load(&g_renders);
-    if (last_r != ~0ull && r == last_r) {
+    // DM_AUDREN_CATCHUP=<n>: catch-up frames only up to update n (start-up, where effects get initialized); after it the update just hands over. Red Dead Redemption's Rockstar logo
+    // movie updates more often than every 5 ms, and the catch-up frames (1,500 in 20 s) and their pacing waits stuttered its sound
+    static long cu_max = -2; if (cu_max == -2) { const char *e = getenv("DM_AUDREN_CATCHUP"); cu_max = e && *e ? atol(e) : -1; if (cu_max >= 0) LOG("audren: catch-up frames only up to update %ld (DM_AUDREN_CATCHUP)", cu_max); }
+    if (last_r != ~0ull && r == last_r && (cu_max < 0 || u <= (uint64_t)cu_max)) {
         uint64_t c = atomic_fetch_add(&g_catchups, 1) + 1;
         if (c <= 3) LOG("audren: no frame rendered before update %llu, rendering a catch-up frame first (%llu so far)", (unsigned long long)u, (unsigned long long)c);
         uint32_t t = atomic_load(&g_cq_tail);
