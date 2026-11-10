@@ -11,6 +11,7 @@
 #endif
 #include <math.h>
 #include <pthread.h>
+#include <string.h>
 #include <time.h>
 
 @interface DmRumbleChannel : NSObject
@@ -65,6 +66,9 @@ static void report(NSError *e, NSString *target, const char *stage) {
     self.failures = MIN(self.failures + 1, 4u);
     self.retryAfter = now() + (1u << (self.failures - 1));
     dm_haptics_clear(self.player);
+    // A split route whose player keeps failing moves to the default locality as well: an 8BitDo Pro 3 in Switch mode ("Pro Controller") rumbles through either handle alone,
+    // but with both handles' engines open the helper refused the left one's player every time ("Couldn't communicate with a helper application", NSCocoaErrorDomain 4097)
+    if (self.fallback && self.failures >= 2 && !strcmp(stage, "create player")) self.fallback(0);
 }
 - (void)engineFailed:(NSError *)error stage:(const char *)stage {
     [self failed:error stage:stage];
@@ -155,7 +159,9 @@ static void configure(int p, GCController *controller) {
     if (controller) {
         GCDeviceHaptics *h = controller.haptics;
         NSSet *localities = h.supportedLocalities;
-        if ([localities containsObject:GCHapticsLocalityLeftHandle] && [localities containsObject:GCHapticsLocalityRightHandle]) {
+        // DM_HAPTICS_SPLIT=0: one engine on the default locality from the start, never one per handle
+        static int split = -1; if (split < 0) { const char *e = getenv("DM_HAPTICS_SPLIT"); split = !e || atoi(e) != 0; if (!split) fprintf(stderr, "haptics: one engine per controller (DM_HAPTICS_SPLIT=0)\n"); }
+        if (split && [localities containsObject:GCHapticsLocalityLeftHandle] && [localities containsObject:GCHapticsLocalityRightHandle]) {
             add_engine(p, @"controller left handle", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityLeftHandle]; });
             add_engine(p, @"controller right handle", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityRightHandle]; });
             // Advertised handle localities can still fail to start. Fall back to the standard
