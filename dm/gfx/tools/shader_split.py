@@ -566,6 +566,35 @@ def pg_shader(d, label):
     if why: red(f'{label} ({st}): {why}')
     return [(f'{label}#PGSO', st, ctl, code)]
 
+def rpf6_shaders(path, rel, out):
+    """Red Dead Redemption: RAGE RPF6 archives (big-endian header {'RPF6', entry count, debug data offset / 8, encryption}, the table at +0x10: count × 20 bytes rounded up to 16,
+    encrypted with the game's white-box cipher). The decrypted table comes from the game's own cipher run in the Mac host (DM_RPF_DECRYPT, dm/host/hle_rpf.c), as <name>.toc in
+    rpf_toc beside the RomFS. An entry is five big-endian words {name hash, stored size, offset (a directory: top bit | first child), flags (0x40000000: compressed, low 24 bits
+    the size), 0}; a file's data is at offset × 8, zstd-compressed (shaders.rpf: 124 'rgxd' effect files with 3,352 GLSLC outputs). Each file is scanned like a loose one"""
+    root = path[:-len(rel)].rstrip('/'); toc = os.path.join(os.path.dirname(root), 'rpf_toc', os.path.basename(path) + '.toc')
+    if not os.path.isfile(toc): return
+    a = open(path, 'rb').read(); t = open(toc, 'rb').read(); n = struct.unpack_from('>I', a, 4)[0]
+    zs = zstd_mod(); bad = 0
+    for i in range(min(n, len(t) // 20)):
+        h, size, off, fl, _ = struct.unpack_from('>5I', t, 20 * i)
+        if off & 0x80000000 or not size or off * 8 + size > len(a): continue
+        d = a[off * 8:off * 8 + size]
+        if d[:4] == ZSTD_MAGIC:
+            try: d = zs.decompress(d)
+            except Exception: bad += 1; continue
+        lab = f'/{rel}/{h:08x}'
+        # RAGE's rgxd effects: each shader is {u32 0x19866891, u32 code length, u32 control length}, then the code area, then the control section (the GLSLC magic, but no GLSLC output)
+        for m in re.finditer(b'\x91\x68\x86\x19', d):
+            c0 = m.start()
+            if c0 + 12 > len(d): continue
+            ncode, nctl = struct.unpack_from('<II', d, c0 + 4)
+            code, ctl = d[c0 + 12:c0 + 12 + ncode], d[c0 + 12 + ncode:c0 + 12 + ncode + nctl]
+            if len(code) != ncode or len(ctl) != nctl or code[:4] not in (GFX_MAGIC, CS_MAGIC) or ctl[:4] != CTL_MAGIC: continue
+            st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code)
+            if not st or check(f'{lab}@{c0:#x}', st, ctl, code): bad += 1; continue
+            out.append((f'{lab}@{c0:#x}#RGXD', st, ctl, code))
+    if bad: red(f'/{rel}: {bad} entries not decompressed (not a plain zstd frame)')
+
 def vpak_shaders(d, label):
     """METAL GEAR SOLID 4 (Master Collection, program 2): common/shaders/vfp_Switch.<n>.pak, magic 'VPAK', u16 version 3. A hash table of shader names (16-byte records {u32 name hash,
     u32 0, u32 first, u32 count}) over a table of variants, then the port's own containers, uncompressed: 'VSH\\x0c' / 'FSH\\x0c' (vertex / fragment) with the uniform names in plain text
@@ -1719,6 +1748,9 @@ def scan_file(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == SPKG or head[:4] == b'\0\0\1\0' and path.endswith('.gz'):   # Three Houses' loose shader packages and chunked zlib files (kt_shaders)
         kt_shaders(open(path, 'rb').read(), '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == b'RPF6':   # Red Dead Redemption's RAGE archives, with the tables the game's own cipher decrypted (rpf6_shaders)
+        rpf6_shaders(path, rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == b'VPAK':   # METAL GEAR SOLID 4's shader archives (vpak_shaders)
         found += vpak_shaders(open(path, 'rb').read(), '/' + rel)
