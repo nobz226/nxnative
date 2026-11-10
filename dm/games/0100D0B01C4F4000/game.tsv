@@ -1,0 +1,7 @@
+# METAL GEAR SOLID 4: Guns of the Patriots - Master Collection Version 1.4.1 (v262144): program 2, the game itself (only in the update; built with NX_PROGRAM_INDEX=2).
+# Made from the build's provisional profile, with the memory layout corrected: the guess (mem_reserve 0x1028000000, mem_alias 0x1008000000) left no heap, and nninitStartup's
+# SetHeapSize(0xa7400000, 2.68 GB) failed (Result 0xd401). The game sets its own heap like Luigi's Mansion 3: the 4 GB layout. mem_used covers main (0x23780000, mostly .bss) and sdk.
+# Shaders: common/shaders/vfp_Switch.{1,2}.pak (shader_split.py vpak_shaders). The English game: DM_LAUNCH_PARAM=-region us -lan en -selfregion NA -resolution 0 -launcherpath 0
+# (program 2; VPAK reader)
+sys_resource	0x0
+mem_used	0x24600000
