@@ -7876,11 +7876,13 @@ static void fb_prepare(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
     if (up_on() && pr && pr->sh[1] && R.rt.n && !g_fz.active && !g_defer_replaying && !strncmp(pr->sh[1]->key, g_up_key, g_up_keylen)) up_prepare(pr);
+    if (pr && pr->sh[1] && passdump() && fb_want(pr->sh[1]->key)) PD("N %llu fb_prepare: shader %s rt.n %d fz %d defer %d bindings %d", g_stat_pass + !g_enc, pr->sh[1]->key, R.rt.n, g_fz.active, g_defer_replaying, pr->sh[1]->rf.nb);
     if (!pr || !pr->sh[1] || !R.rt.n || g_fz.active || g_defer_replaying || !fb_want(pr->sh[1]->key)) return;
     NvShader *fs = pr->sh[1];
-    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= NTEX) continue;
+    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i]; PD("N %llu fb_prepare: binding %d kind %d reg %d", g_stat_pass + !g_enc, i, b->kind, b->reg); if (b->kind != NVN_RB_TEX || b->reg >= NTEX) continue;
         int tid = (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff); if (!tid) continue;
         os_unfair_lock_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0; os_unfair_lock_unlock(&g_rmu);
+        PD("N %llu fb_prepare: binding %d kind %d reg %d tid %d ser %llu, attachment 0 ser %llu", g_stat_pass + !g_enc, i, b->kind, b->reg, tid, (unsigned long long)ser, (unsigned long long)(R.rt.color[0] ? R.rt.color[0]->serial : 0));
         if (!ser) continue;
         for (int k = 0; k < R.rt.n && k < 8 && g_fb_n < 4; k++) { if (!R.rt.color[k] || R.rt.color[k]->serial != ser) continue;
             uint64_t aser; int lv, sl; rt_sub(&R.rt, k, &aser, &lv, &sl);
@@ -7888,6 +7890,7 @@ static void fb_prepare(NvProg *pr) {
             if (!t) continue;
             int dup = 0; for (int q = 0; q < g_fb_n; q++) dup |= g_fb_src[q] == t; if (dup) continue;
             id<MTLTexture> base = t.parentTexture ? t.parentTexture : t; NSUInteger tl = t.parentTexture ? t.parentRelativeLevel : 0, ts = t.parentTexture ? t.parentRelativeSlice : 0;
+            PD("N %llu fb_prepare: attachment %d level %d layer %d; sampled view type %lu levels %lu+%lu layer %lu samples %lu, shader type %d, base has parent %d", g_stat_pass + !g_enc, k, lv, sl, (unsigned long)t.textureType, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)ts, (unsigned long)t.sampleCount, b->dtt, base.parentTexture != nil);
             if (tl + t.mipmapLevelCount <= (NSUInteger)lv || tl > (NSUInteger)lv) continue;   // the sampled levels do not include the attachment's level (mip generation etc.): not feedback
             // Mip-chain generation through a view of the whole chain (Red Dead Redemption: bloom / depth of field 53a9718080128b5a and the tree impostors 91ff68906af7039d draw level n
             // while sampling a view of levels 0..3 or 0..5, reading level n-1): the view includes the level being written, and the GPU read black blocks in the trees, bloom and depth of field.
