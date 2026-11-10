@@ -7,3 +7,4 @@ sys_resource	0x0
 render_cond	on
 tex_flush_upload	on
 tex_dirty_upload	on
+feedback_snap	68042497e551e9d0
