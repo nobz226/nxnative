@@ -25,6 +25,11 @@
 @property(nonatomic) uint64_t silenceGeneration;
 @property(nonatomic) NSTimeInterval retryAfter;
 @property(nonatomic) unsigned failures;
+@property(nonatomic) BOOL simple;   // pulses of plain players instead of the advanced looping player (see applySimple:)
+@property(nonatomic) id<CHHapticPatternPlayer> pulse;
+@property(nonatomic) dm_haptic_level pulseLevel;
+@property(nonatomic) NSTimeInterval pulseAt;
+@property(nonatomic) uint64_t pulseSeq;
 - (void)apply:(dm_haptic_level)level;
 - (void)stop;
 @end
@@ -58,6 +63,7 @@ static void report(NSError *e, NSString *target, const char *stage) {
     self.generation++; self.silenceGeneration++;
     self.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; }; self.engine.resetHandler = ^{};
     [self.pattern stopAtTime:CHHapticTimeImmediate error:nil]; self.pattern = nil;
+    [self.pulse stopAtTime:CHHapticTimeImmediate error:nil]; self.pulse = nil; self.pulseSeq++;
     [self.engine stopWithCompletionHandler:nil];   // the engine stays: the next effect restarts it
 }
 - (void)failed:(NSError *)error stage:(const char *)stage {
@@ -76,7 +82,42 @@ static void report(NSError *e, NSString *target, const char *stage) {
     // a player or parameter failure (a service reset, say) is retried on the same handle.
     if (self.fallback) self.fallback(self.retryAfter);
 }
+// Plain-player pulses: each update starts a 0.25 s continuous effect at the update's level (the previous pulse stopped); while the level stays above zero the pulse is renewed
+// every 0.2 s, so a game that sets rumble once and leaves it keeps rumbling; an update to zero stops it. Updates with the same level within 0.15 s are not restarted
+- (void)applySimple:(dm_haptic_level)level {
+    NSError *error = nil;
+    if (level.intensity <= 0) { [self.pulse stopAtTime:CHHapticTimeImmediate error:nil]; self.pulse = nil; self.pulseSeq++; return; }
+    if (now() < self.retryAfter) { dm_haptics_clear(self.player); return; }
+    NSTimeInterval t = now();
+    if (self.pulse && fabsf(level.intensity - self.pulseLevel.intensity) < 0.02f && fabsf(level.sharpness - self.pulseLevel.sharpness) < 0.02f && t - self.pulseAt < 0.15) return;
+    if (!self.engine) {
+        self.engine = self.createEngine(&error);
+        if (!self.engine) { [self failed:error stage:"create engine (pulses)"]; return; }
+        self.engine.playsHapticsOnly = YES; self.engine.autoShutdownEnabled = NO;
+        __weak DmRumbleChannel *weak = self;
+        self.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; dispatch_async(queue, ^{ DmRumbleChannel *c = weak; if (c) { c.pulse = nil; c.pulseSeq++; c.engine = nil; } }); };
+        self.engine.resetHandler = ^{ dispatch_async(queue, ^{ DmRumbleChannel *c = weak; if (c) { c.pulse = nil; c.pulseSeq++; c.engine = nil; } }); };
+        if (![self.engine startAndReturnError:&error]) { [self failed:error stage:"start engine (pulses)"]; return; }
+    }
+    CHHapticEvent *event = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous parameters:@[
+        [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:MIN(level.intensity, 1.0f)],
+        [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:MAX(0.0f, MIN(level.sharpness, 1.0f))]
+    ] relativeTime:0 duration:0.25];
+    CHHapticPattern *pattern = [[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:&error];
+    id<CHHapticPatternPlayer> p = pattern ? [self.engine createPlayerWithPattern:pattern error:&error] : nil;
+    if (!p) { [self failed:error stage:"create player (pulses)"]; return; }
+    [self.pulse stopAtTime:CHHapticTimeImmediate error:nil];
+    if (![p startAtTime:CHHapticTimeImmediate error:&error]) { self.pulse = nil; [self failed:error stage:"start player (pulses)"]; return; }
+    self.pulse = p; self.pulseLevel = level; self.pulseAt = t; self.failures = 0;
+    uint64_t seq = ++self.pulseSeq;
+    __weak DmRumbleChannel *weak = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), queue, ^{
+        DmRumbleChannel *c = weak; if (!c || c.pulseSeq != seq || !c.pulse) return;
+        c.pulseAt = 0; [c applySimple:c.pulseLevel];   // renew at the same level
+    });
+}
 - (void)apply:(dm_haptic_level)level {
+    if (self.simple) { [self applySimple:level]; return; }
     uint64_t silence = ++self.silenceGeneration;
     NSError *error = nil;
     if (!self.pattern) {
@@ -109,7 +150,12 @@ static void report(NSError *e, NSString *target, const char *stage) {
         ] relativeTime:0 duration:30];
         CHHapticPattern *pattern = [[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:&error];
         self.pattern = pattern ? [self.engine createAdvancedPlayerWithPattern:pattern error:&error] : nil;
-        if (!self.pattern) { [self failed:error stage:"create player"]; return; }
+        if (!self.pattern) {
+            // An 8BitDo Pro 3 in Switch mode ("Pro Controller"): macOS's helper refuses the advanced player on every locality ("Couldn't communicate with a helper application",
+            // NSCocoaErrorDomain 4097) and the engine is unusable afterwards, while plain players work on all of them. Such a channel plays pulses of plain players from then on
+            if (!self.simple) { report(error, self.target, "create player (advanced); using pulses of plain players from now on"); self.simple = YES; self.fallback = nil; [self stop]; self.engine = nil; [self applySimple:level]; return; }
+            [self failed:error stage:"create player"]; return;
+        }
         self.pattern.loopEnabled = YES;
         self.pattern.isMuted = YES;
         if (![self.pattern startAtTime:CHHapticTimeImmediate error:&error]) { [self failed:error stage:"start player"]; return; }
