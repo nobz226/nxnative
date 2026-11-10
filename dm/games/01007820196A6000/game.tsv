@@ -1,6 +1,9 @@
 # Red Dead Redemption 1.0.7 (v458752). Made from the build's provisional profile, plus render_cond on: the game wraps draws in conditional rendering (SetRenderEnableConditional),
-# which the host drew anyway: the main menu came out scrambled, parts of its UI missing. Its archives' tables are decrypted with its own cipher (hle_rpf.c, DM_RPF_DECRYPT); shaders:
+# which the host drew anyway: the main menu came out scrambled, parts of its UI missing. tex_flush_upload / tex_dirty_upload on: it streams textures and draws its UI (Scaleform)
+# into textures it fills from the CPU; without them the 3D scene's textures flickered and the menu was missing. Its archives' tables are decrypted with its own cipher (hle_rpf.c, DM_RPF_DECRYPT); shaders:
 # shader_split.py rpf6_shaders / rgxd_records, plus 2 boot-screen shaders filled in at run time (<version>/nvn_capture). The second audio renderer is driven by the host (hle_audren.c)
 # (RPF6 + rgxd)
 sys_resource	0x0
 render_cond	on
+tex_flush_upload	on
+tex_dirty_upload	on
