@@ -7878,8 +7878,10 @@ static void fb_prepare(NvProg *pr) {
     if (up_on() && pr && pr->sh[1] && R.rt.n && !g_fz.active && !g_defer_replaying && !strncmp(pr->sh[1]->key, g_up_key, g_up_keylen)) up_prepare(pr);
     if (!pr || !pr->sh[1] || !R.rt.n || g_fz.active || g_defer_replaying || !fb_want(pr->sh[1]->key)) return;
     NvShader *fs = pr->sh[1];
-    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= NTEX) continue;
-        int tid = (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff); if (!tid) continue;
+    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i];
+        // a texture slot, or a handle in a uniform buffer (TEXU without an array: Red Dead Redemption's mip-chain shaders), as encode_args reads them
+        if (b->kind == NVN_RB_TEX ? b->reg >= NTEX : b->kind != NVN_RB_TEXU || b->n) continue;
+        int tid = b->kind == NVN_RB_TEXU ? ubo_tex_id(ubo_handle(1, b->reg, b->off)) : (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff); if (!tid) continue;
         os_unfair_lock_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0; os_unfair_lock_unlock(&g_rmu);
         if (!ser) continue;
         for (int k = 0; k < R.rt.n && k < 8 && g_fb_n < 4; k++) { if (!R.rt.color[k] || R.rt.color[k]->serial != ser) continue;
