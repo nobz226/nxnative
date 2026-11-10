@@ -2,6 +2,8 @@
 // Only entry points that go to a service are hooked; library functions that only read and write the game's own buffers (prepo Add / Array / Struct, err ErrorResultVariant, friends getters, socket byte-order conversion) keep running in the SDK.
 // Return convention as in hle_friends.c: Result returns RES_FAIL ("saved / submitted" kinds return RES_OK so the game does not retry); bool returns false; events get a bound SystemEvent that never fires.
 #include "hle.h"
+#include <TargetConditionals.h>
+#include <spawn.h>
 
 static _Alignas(16) uint8_t g_ev_ldn[0x100];
 
@@ -159,7 +161,24 @@ HLE_FORCE("_ZN2nn3pdm30QueryApplicationPlayStatisticsEPNS0_25ApplicationPlayStat
 // ---------- web: web page applet (online lobby). Unavailable ----------
 HLE_FORCE("_ZN2nn3web13ShowLobbyPageEPNS0_20LobbyPageReturnValueERKNS0_16ShowLobbyPageArgE", "online lobby web applet (cut)", Result, h_web_Lobby, void *rv, const void *arg) { (void)rv; (void)arg; LOG("web::ShowLobbyPage (cut)"); return RES_FAIL; }
 // Tears of the Kingdom imports the general web page applet too (the game constructs the return value itself, so it stays as constructed)
-HLE_FORCE("_ZN2nn3web11ShowWebPageEPNS0_18WebPageReturnValueERKNS0_14ShowWebPageArgE", "web page applet (cut)", Result, h_web_Page, void *rv, const void *arg) { (void)rv; (void)arg; LOG("web::ShowWebPage (cut)"); return RES_FAIL; }
+// METAL GEAR SOLID 4 (Master Collection): the main menu's Manual button opens the online manual this way. The argument (0x2000 bytes of TLVs) holds the initial URL (type 1): on the Mac
+// the host opens it in the default browser and reports the applet as closed; elsewhere (iOS) the call fails as before
+extern char **environ;
+HLE_FORCE("_ZN2nn3web11ShowWebPageEPNS0_18WebPageReturnValueERKNS0_14ShowWebPageArgE", "web page applet: the URL opens in the Mac's browser", Result, h_web_Page, void *rv, const void *arg) {
+    (void)rv;
+    char url[0xc00] = {0}; const char *p = arg;
+    for (size_t i = 0; p && i + 8 < 0x2000 && !url[0]; i++) if (!memcmp(p + i, "http://", 7) || !memcmp(p + i, "https://", 8)) {
+        size_t n = 0; while (i + n < 0x2000 && n < sizeof url - 1 && (unsigned char)p[i + n] > 0x20 && (unsigned char)p[i + n] < 0x7f) { url[n] = p[i + n]; n++; } url[n] = 0; }
+    if (!url[0]) { LOG("web::ShowWebPage: no URL in the argument (cut)"); return RES_FAIL; }
+#if TARGET_OS_OSX
+    pid_t pid; char *av[] = {"/usr/bin/open", url, NULL};
+    int e = posix_spawn(&pid, "/usr/bin/open", NULL, NULL, av, environ);
+    LOG("web::ShowWebPage: %s (%s)", url, e ? "could not start the browser" : "opened in the browser");
+    return e ? RES_FAIL : RES_OK;
+#else
+    LOG("web::ShowWebPage: %s (cut)", url); return RES_FAIL;
+#endif
+}
 // Octopath Traveler 0 imports the offline HTML page applet too (pages shipped in the game's HTML document NCA, which the host does not extract)
 HLE_FORCE("_ZN2nn3web19ShowOfflineHtmlPageEPNS0_26OfflineHtmlPageReturnValueERKNS0_22ShowOfflineHtmlPageArgE", "offline HTML page applet (cut)", Result, h_web_Offline, void *rv, const void *arg) {
     (void)rv; (void)arg; LOG("web::ShowOfflineHtmlPage (cut)"); return RES_FAIL;
