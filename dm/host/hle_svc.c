@@ -37,6 +37,14 @@ static void *memdump_thread(void *arg) {
     FILE *f = fopen(path, "wb"); if (!f) { LOG("[RED] DM_MEMDUMP: cannot write %s", path); return NULL; }
     size_t w = fwrite(g_heap, 1, n, f); fclose(f);
     LOG("DM_MEMDUMP: %zu bytes of the guest heap (at %p) written to %s after %u s", w, g_heap, path, secs);
+    // and each loaded module (code, data and .bss: a game keeps state in its globals too), to <file>.<module name>
+    extern module_t g_mod[]; extern int g_nmod;
+    for (int i = 0; i < g_nmod; i++) {
+        char p2[1024]; snprintf(p2, sizeof p2, "%s.%s", path, g_mod[i].name);
+        FILE *g = fopen(p2, "wb"); if (!g) continue;
+        size_t w2 = fwrite(g_mod[i].base, 1, g_mod[i].size, g); fclose(g);
+        LOG("DM_MEMDUMP: module %s, %zu bytes (at %p) written to %s", g_mod[i].name, w2, g_mod[i].base, p2);
+    }
     return NULL;
 }
 static void mem_init_once(void) {
