@@ -1,7 +1,22 @@
-# METAL GEAR SOLID 4: Guns of the Patriots - Master Collection Version 1.4.1 (v262144): program 2, the game itself (only in the update; built with NX_PROGRAM_INDEX=2).
-# Made from the build's provisional profile, with the memory layout corrected: the guess (mem_reserve 0x1028000000, mem_alias 0x1008000000) left no heap, and nninitStartup's
-# SetHeapSize(0xa7400000, 2.68 GB) failed (Result 0xd401). The game sets its own heap like Luigi's Mansion 3: the 4 GB layout. mem_used covers main (0x23780000, mostly .bss) and sdk.
-# Shaders: common/shaders/vfp_Switch.{1,2}.pak (shader_split.py vpak_shaders). The English game: DM_LAUNCH_PARAM=-region us -lan en -selfregion NA -resolution 0 -launcherpath 0
-# (program 2; VPAK reader)
+# METAL GEAR SOLID 4: Guns of the Patriots - Master Collection Version 1.4.1 (v262144): program 2, the game itself (only in the update; build with NX_PROGRAM_INDEX=2).
+# PORTED, NOT BUILT: values recorded from the old mgs4 branch. The shader tables are not here: the first build makes them. Memory: the 4 GB layout; the guess left no heap and SetHeapSize failed (0xd401).
+# Shaders: common/shaders/vfp_Switch.{1,2}.pak (shader_split.py vpak_shaders). env.txt for the English game: DM_LAUNCH_PARAM=-region us -lan en -selfregion NA -resolution 0 -launcherpath 0
+title_id	0100D0B01C4F4000
+program_id	0100D0B01C4F4002
+name	METAL GEAR SOLID 4: Guns of the Patriots - Master Collection Version
+ipa	MetalGearSolid4.ipa
+app_category	public.app-category.games
+build	v262144	1.4.1	main=3f3713a6149c24fa0d3c6ef3d9fc1f0b	sdk=f118ae1c2e7728471aaf1a0d58484968
+package	v262144
+shader_versions	v262144
+modules	main sdk
+romfs_marker	jp/dat_uncompressed.2.pak
+zip_store	.bank:.bk2:.dar:.dld:.dlz:.pak:.slot:.ssp:.tgs:.ttf:.metallib
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
 sys_resource	0x0
 mem_used	0x24600000
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	METAL GEAR SOLID 4: Guns of the Patriots - Master Collection Version shaders (program 2; VPAK reader)
