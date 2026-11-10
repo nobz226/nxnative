@@ -95,6 +95,7 @@ static int16_t g_frame2[FRAME_MAX * 2]; static int g_frame2_n;   // renderer 2's
 static _Atomic uint64_t g_frames, g_nonsilent;
 enum { CQ = 4 }; static int16_t g_cq[CQ][FRAME_MAX * 2]; static int g_cq_n[CQ]; static _Atomic uint32_t g_cq_head, g_cq_tail;   // output queue of catch-up frames
 static pthread_mutex_t g_cq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_cq_cv = PTHREAD_COND_INITIALIZER;   // the render thread signals each frame it takes off the queue (catch-up pacing)
+static int16_t g_cq2[CQ][FRAME_MAX * 2]; static int g_cq2_n[CQ]; static _Atomic uint32_t g_cq2_head, g_cq2_tail;   // the same for renderer 2 (its catch-up frames used to be discarded)
 static void cq_popped(void) { pthread_mutex_lock(&g_cq_mu); pthread_cond_broadcast(&g_cq_cv); pthread_mutex_unlock(&g_cq_mu); }
 
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // same as the front of hle_audio.c's AudioOutBuffer
@@ -123,7 +124,9 @@ static void render_main(void *arg) {
         if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
         if (atomic_load(&g_open2)) {
             pthread_mutex_lock(&g_r2_mu);
-            if (atomic_load(&g_open2)) { g_frame2_n = 0; t_dst = g_frame2; t_nout = &g_frame2_n; exec(g_handle2[0], g_handle2[1]); t_dst = NULL; t_nout = NULL; }
+            if (atomic_load(&g_open2)) { uint32_t h2 = atomic_load(&g_cq2_head);
+                if (h2 != atomic_load(&g_cq2_tail)) { g_frame2_n = g_cq2_n[h2 % CQ]; memcpy(g_frame2, g_cq2[h2 % CQ], (size_t)g_frame2_n * 4); atomic_store(&g_cq2_head, h2 + 1); cq_popped(); }   // queued catch-up output first, as for renderer 1
+                else { g_frame2_n = 0; t_dst = g_frame2; t_nout = &g_frame2_n; exec(g_handle2[0], g_handle2[1]); t_dst = NULL; t_nout = NULL; } }
             pthread_mutex_unlock(&g_r2_mu);
             int16_t *o = b->ptr; int m = g_frame2_n < n ? g_frame2_n : n;
             for (int i = 0; i < m * 2; i++) { int v = o[i] + g_frame2[i]; o[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
@@ -170,7 +173,7 @@ static Result ar_open(void **handle, void *ev, const uint8_t *param, void *work,
     if (owned) objmap_put(handle[0], owned);   // Close releases it only after the render thread and the SDK have finished with it
     if (atomic_load(&g_open)) {
         if (atomic_load(&g_open2)) { LOG("[RED] audren: a third renderer (the host drives two)"); return r; }
-        g_handle2[0] = handle[0]; g_handle2[1] = handle[1]; atomic_store(&g_open2, 1);
+        g_handle2[0] = handle[0]; g_handle2[1] = handle[1]; atomic_store(&g_cq2_head, atomic_load(&g_cq2_tail)); atomic_store(&g_open2, 1);
         LOG("audren: a second renderer: rendered by the host after the first, every frame, and mixed in"); return r;
     }
     g_handle[0] = handle[0]; g_handle[1] = handle[1]; atomic_store(&g_open, 1);
@@ -316,7 +319,7 @@ static int capture(const uint8_t *cl, size_t len, int16_t *dst) {
 }
 // Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer
 static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
-static _Atomic uint64_t g_updates, g_renders, g_catchups, g_renders2;
+static _Atomic uint64_t g_updates, g_renders, g_catchups, g_renders2, g_catchups2;
 static int is_r2(const uint8_t *sys) { return atomic_load(&g_open2) && g_handle2[0] && sys == (const uint8_t *)g_handle2[0] + 0x60; }
 // SDK 20's AudioRenderSystem (The Legend of Zelda: Breath of the Wild 1.9.0) has another layout: the member functions for mode / device / command buffer are inlined (sdk+0x22a70c ExecuteAudioRendererRendering:
 //   +0x48 rendering device and +0x4c execution mode, both must be 1; +0xf8 / +0x100 command buffer start / length), GenerateCommand takes a Span<std::byte> and returns a Span (x0 start, x1 length: the generated command list),
@@ -390,7 +393,7 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
     if (dst) *nout = capture(cl, n, dst);
     // render time per frame (budget: 5 ms per frame): mean / max every 2000 frames
     static uint64_t sum, mx, cnt; uint64_t d = now_ns() - t0; sum += d; if (d > mx) mx = d;
-    if (++cnt == 2000) { LOG("audren: render time mean %.2f ms / max %.2f ms (5 ms budget per frame, last 2000 frames); catch-up renders so far %llu", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&g_catchups)); sum = mx = cnt = 0; }
+    if (++cnt == 2000) { LOG("audren: render time mean %.2f ms / max %.2f ms (5 ms budget per frame, last 2000 frames); catch-up renders so far %llu (renderer 2: %llu)", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&g_catchups), (unsigned long long)atomic_load(&g_catchups2)); sum = mx = cnt = 0; }
     pthread_mutex_unlock(&g_render_mu);
     return RES_OK;
 }
@@ -416,9 +419,20 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
           Result, h_ars_Update, uint8_t *sys, void *o, size_t on, void *p, size_t pn, const void *in, size_t inn) {
     static Result (*orig)(void *, void *, size_t, void *, size_t, const void *, size_t); if (!orig) orig = gsym("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm");
     static uint64_t last_r = ~0ull, last_r2 = ~0ull;
-    if (is_r2(sys)) {   // renderer 2: a catch-up frame when nothing rendered it since its last update (its effects get initialized); the output is not played
-        uint64_t r2 = atomic_load(&g_renders2);
-        if (last_r2 != ~0ull && r2 == last_r2) render_once(sys, NULL, NULL);
+    if (is_r2(sys)) {   // renderer 2: a catch-up frame when nothing rendered it since its last update, queued and paced as renderer 1's below. Discarding its output cut 5 ms gaps
+        uint64_t r2 = atomic_load(&g_renders2);   // into Red Dead Redemption's Rockstar logo sound (its movie updates this renderer faster than the render thread rendered it)
+        if (last_r2 != ~0ull && r2 == last_r2) {
+            atomic_fetch_add(&g_catchups2, 1);
+            uint32_t t = atomic_load(&g_cq2_tail);
+            if (t - atomic_load(&g_cq2_head) >= CQ) {
+                struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 50000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+                pthread_mutex_lock(&g_cq_mu);
+                { int hw = dm_thread_host_wait_begin(); while (atomic_load(&g_open2) && t - atomic_load(&g_cq2_head) >= CQ && !pthread_cond_timedwait(&g_cq_cv, &g_cq_mu, &dl)) {} dm_thread_host_wait_end(hw); }
+                pthread_mutex_unlock(&g_cq_mu);
+            }
+            if (t - atomic_load(&g_cq2_head) < CQ) { render_once(sys, g_cq2[t % CQ], &g_cq2_n[t % CQ]); atomic_store(&g_cq2_tail, t + 1); }
+            else render_once(sys, NULL, NULL);
+        }
         Result res2 = orig(sys, o, on, p, pn, in, inn); last_r2 = atomic_load(&g_renders2); return res2;
     }
     uint64_t u = atomic_fetch_add(&g_updates, 1) + 1, r = atomic_load(&g_renders);
