@@ -7889,6 +7889,17 @@ static void fb_prepare(NvProg *pr) {
             int dup = 0; for (int q = 0; q < g_fb_n; q++) dup |= g_fb_src[q] == t; if (dup) continue;
             id<MTLTexture> base = t.parentTexture ? t.parentTexture : t; NSUInteger tl = t.parentTexture ? t.parentRelativeLevel : 0, ts = t.parentTexture ? t.parentRelativeSlice : 0;
             if (tl + t.mipmapLevelCount <= (NSUInteger)lv || tl > (NSUInteger)lv) continue;   // the sampled levels do not include the attachment's level (mip generation etc.): not feedback
+            // Mip-chain generation through a view of the whole chain (Red Dead Redemption: bloom / depth of field 53a9718080128b5a and the tree impostors 91ff68906af7039d draw level n
+            // while sampling a view of levels 0..3 or 0..5, reading level n-1): the view includes the level being written, and the GPU read black blocks in the trees, bloom and depth of field.
+            // No copy is needed: the draw samples a view of the levels below the attachment's only (explicit LODs stay valid, they are relative to the same base level)
+            if (tl < (NSUInteger)lv && t.textureType == MTLTextureType2D && t.sampleCount == 1 && b->dtt == MTLTextureType2D && !base.parentTexture) {
+                id<MTLTexture> use = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(tl, (NSUInteger)lv - tl) slices:NSMakeRange(ts, 1) swizzle:t.swizzle];
+                if (!use) { RED_ONCE(82, "same-pass feedback sampling: cannot create the view of the levels below the attachment (format %lu); left as is", (unsigned long)t.pixelFormat); continue; }
+                if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
+                g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;
+                static uint64_t nmip; if (++nmip == 1) MLOG("same-pass feedback sampling: a mip-chain draw samples the levels below the attachment only (shader %s, attachment level %d, view levels %lu+%lu)", fs->key, lv, (unsigned long)tl, (unsigned long)t.mipmapLevelCount);
+                PD("N %llu same-pass feedback sampling: attachment %d level %d sampled through a view of levels %lu..%d", g_stat_pass + !g_enc, k, lv, (unsigned long)tl, lv - 1);
+                continue; }
             if (t.textureType != MTLTextureType2D || t.mipmapLevelCount != 1 || t.sampleCount != 1 || ts != (NSUInteger)sl || b->dtt != MTLTextureType2D || base.parentTexture) {
                 RED_ONCE(80, "same-pass feedback sampling: the sampled view is not a single-level 2D view of the attachment's level and layer (type %lu levels %lu+%lu layer %lu, attachment level %d layer %d, shader %s); left as is", (unsigned long)t.textureType, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)ts, lv, sl, fs->key);
                 continue; }
