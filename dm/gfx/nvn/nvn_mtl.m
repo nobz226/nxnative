@@ -9136,7 +9136,12 @@ void ms_after(void) {
 static int g_fb_mode = -1;   // 0 none, 1 writers with reuse until a barrier, 2 every sampling draw, fresh
 static uint64_t g_fb_bar, g_fb_reuse, g_fb_split;   // game barriers so far (OP_BARRIER with bits); draws that reused a snapshot; passes ended before a write to an attachment an earlier draw read
 static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask;   // the current Metal render pass: color attachments written so far, sampled directly
-typedef struct { uint64_t ser, bar, sub; int lv, sl; __strong id<MTLTexture> snap; } fb_cache_t;
+typedef struct { uint64_t ser, bar, sub, dgen; int lv, sl, dep; __strong id<MTLTexture> snap; } fb_cache_t;
+// Depth copies outlive the game's barriers: g_fb_dgen counts what can change a depth or stencil buffer (a draw with depth writes or stencil testing on a depth attachment,
+// a depth-stencil clear, a texture copy, clear or draw-texture, a dispatch), and a depth copy is reused until it moves or the submission ends.
+// Donkey Kong Country: Tropical Freeze's world 1 boss puts a barrier between its depth-sampling draws: a fresh copy each, and the pass ended for it, 59 load-all store-all passes a frame. DM_NVN_FB_DEPTH_BAR=1: a barrier makes them stale, as for colour
+static uint64_t g_fb_dgen, g_fb_dreuse; static int g_fb_dlast;
+static int fb_depth_bar(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FB_DEPTH_BAR"); v = e && !strcmp(e, "1"); if (v) MLOG("same-pass depth sampling: a copy is stale after a game barrier (DM_NVN_FB_DEPTH_BAR=1)"); } return v; }
 static fb_cache_t g_fbc[8]; static int g_fbc_next;
 static int fb_mode(void) {
     if (g_fb_mode < 0) { const char *e = getenv("DM_NVN_FB_SNAP"); g_fb_mode = e && !strcmp(e, "0") ? 0 : e && !strcmp(e, "all") ? 2 : 1;
@@ -9146,21 +9151,23 @@ static int fb_mode(void) {
 static int fb_depth_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FB_DEPTH"); v = !(e && !strcmp(e, "0")); } return v; }   // DM_NVN_FB_DEPTH=0: a draw samples its own depth attachment directly
 static inline void fb_pass_sync(void) { uint64_t p = g_stat_pass + !g_enc; if (p != g_fb_pass) { g_fb_pass = p; g_fb_wmask = g_fb_rmask = 0; } }
 // The snapshot of an attachment's level and layer: the cached one (valid: *fresh = 0) or a texture to copy into (*fresh = 1; the entry is then valid from this barrier and submission on)
-static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUInteger w, NSUInteger h, int force, int *fresh) {
+static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUInteger w, NSUInteger h, int force, int dep, int *fresh) {
     fb_cache_t *e = NULL;
-    for (int i = 0; i < 8 && !e; i++) if (g_fbc[i].snap && g_fbc[i].ser == ser && g_fbc[i].lv == lv && g_fbc[i].sl == sl) e = &g_fbc[i];
+    for (int i = 0; i < 8 && !e; i++) if (g_fbc[i].snap && g_fbc[i].ser == ser && g_fbc[i].lv == lv && g_fbc[i].sl == sl && g_fbc[i].dep == dep) e = &g_fbc[i];
     if (e && (e->snap.pixelFormat != pf || e->snap.width != w || e->snap.height != h)) { defer_obj_release(e->snap); e->snap = nil; }
-    if (e && e->snap && !force && e->bar == g_fb_bar && e->sub == g_sub_serial) { *fresh = 0; return e; }
+    if (e && e->snap && !force && e->sub == g_sub_serial && (dep && !fb_depth_bar() ? e->dgen == g_fb_dgen : e->bar == g_fb_bar && (!dep || e->dgen == g_fb_dgen))) { *fresh = 0; if (dep) g_fb_dreuse++; return e; }
     if (!e) { e = &g_fbc[g_fbc_next]; g_fbc_next = (g_fbc_next + 1) & 7;
         if (e->snap && (e->snap.pixelFormat != pf || e->snap.width != w || e->snap.height != h)) { defer_obj_release(e->snap); e->snap = nil; } }
     if (!e->snap) { MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
         d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView; d.storageMode = MTLStorageModePrivate;
         e->snap = [g_dev newTextureWithDescriptor:d]; if (!e->snap) { e->ser = 0; return NULL; } res_add(e->snap); }   // full queue barriers separate a copy from the draws that read the earlier content
-    e->ser = ser; e->lv = lv; e->sl = sl; e->bar = g_fb_bar; e->sub = g_sub_serial; *fresh = 1; return e;
+    e->ser = ser; e->lv = lv; e->sl = sl; e->dep = dep; e->bar = g_fb_bar; e->sub = g_sub_serial; e->dgen = g_fb_dgen; *fresh = 1; return e;
 }
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
 static void fb_prepare(NvProg *pr) {
     g_draw_seq++; g_fb_n = 0;
+    if (g_fb_dlast) g_fb_dgen++;   // the previous draw could change depth or stencil: copies taken before it are stale (this draw's own copy is taken before it draws)
+    g_fb_dlast = R.rt.depth && (S.ds.dw || S.ds.st);   // a depth test alone writes nothing; a stencil test can (its ops)
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
     if (!pr || !pr->sh[1] || !R.rt.n || g_fz.active || g_defer_replaying || !fb_mode()) return;
     NvShader *fs = pr->sh[1];
@@ -9201,7 +9208,7 @@ static void fb_prepare(NvProg *pr) {
                 RED_ONCE(80, "same-pass feedback sampling: the sampled view is not a single-level 2D view of the attachment's level and layer (type %lu levels %lu+%lu layer %lu, attachment level %d layer %d, shader %s); left as is", (unsigned long)t.textureType, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)ts, lv, sl, fs->key);
                 continue; }
             NSUInteger w = MAX(base.width >> lv, 1ul), h = MAX(base.height >> lv, 1ul); int fresh;
-            fb_cache_t *e = fb_snap(ser, lv, sl, base.pixelFormat, w, h, g_fb_mode == 2, &fresh); if (!e) continue;
+            fb_cache_t *e = fb_snap(ser, lv, sl, base.pixelFormat, w, h, g_fb_mode == 2, 0, &fresh); if (!e) continue;
             id<MTLTexture> snap = e->snap;
             if (fresh) {
                 if (g_enc) rp_end();
@@ -9228,7 +9235,7 @@ static void fb_prepare(NvProg *pr) {
             os_unfair_lock_lock(&g_rmu); void *tv = NULL; tex_fast_rid(tid, &tv); id<MTLTexture> t = (__bridge id<MTLTexture>)tv; os_unfair_lock_unlock(&g_rmu);
             if (!t || t.parentTexture || t.textureType != MTLTextureType2D || t.sampleCount != 1 || t.mipmapLevelCount != 1 || lv || sl || b->dtt != MTLTextureType2D) continue;
             int dup = 0; for (int q = 0; q < g_fb_n; q++) dup |= g_fb_src[q] == t; if (dup) continue;
-            int fresh; fb_cache_t *e = fb_snap(ser, 0, 0, t.pixelFormat, t.width, t.height, 0, &fresh); if (!e) continue;
+            int fresh; fb_cache_t *e = fb_snap(ser, 0, 0, t.pixelFormat, t.width, t.height, 0, 1, &fresh); if (!e) continue;
             if (fresh) { if (g_enc) rp_end(); id<MTL4ComputeCommandEncoder> be = blit(); enc_b_copy_texture(be, t, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(t.width, t.height, 1), e->snap, 0, 0, MTLOriginMake(0, 0, 0)); }
             if (!g_enc) fb_pass_sync();
             MTLTextureSwizzleChannels sw = t.swizzle;
@@ -9237,7 +9244,7 @@ static void fb_prepare(NvProg *pr) {
             if (!use) continue;
             if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
             g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;
-            static uint64_t nd; if (fresh && (++nd == 1 || nd == 1000 || nd % 100000 == 0)) MLOG("same-pass depth sampling: snapshot #%llu (frame %llu, shader %s slot %d, ser=%llu %lux%lu format %lu)", (unsigned long long)nd, (unsigned long long)atomic_load(&g_cur_frame), fs->key, b->reg, (unsigned long long)ser, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat);
+            static uint64_t nd; if (fresh && (++nd == 1 || nd == 1000 || nd % 100000 == 0)) MLOG("same-pass depth sampling: snapshot #%llu, %llu draws reused one (frame %llu, shader %s slot %d, ser=%llu %lux%lu format %lu)", (unsigned long long)nd, (unsigned long long)g_fb_dreuse, (unsigned long long)atomic_load(&g_cur_frame), fs->key, b->reg, (unsigned long long)ser, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat);
         }
     }
     g_fb_wmask |= wm;
@@ -10979,6 +10986,7 @@ void mtl_exec(const uint8_t *p) {
         if (p == g_defer_pend) { for (int gi = 0; gi < 4; gi++) if (g_defer_slots[gi].active && g_defer_slots[gi].p_end_op == p) g_defer_slots[gi].in_p = 0; g_defer_pend = NULL; }
         sdx_seq(p);
         if (trace) PD("o cmd=%p pass=%llu op=%u size=%u", p, g_stat_pass, (unsigned)h.op, (unsigned)h.size);
+        switch (h.op) { case OP_CLEAR_DS: case OP_CLEAR_TEX: case OP_COPY_T2T: case OP_COPY_B2T: case OP_DRAW_TEX: case OP_DISPATCH: case OP_SET_TEX_POOL: g_fb_dgen++; break; default: break; }   // in the game's order, hoisted or not: depth copies taken before it are stale (fb_snap)
         // Diagnostic DM_NVN_ALLOCPROF=1: growth of the GPU allocated size is charged to the previous operation's type (rough: allocations on other threads are counted too); the memory report line appends the top 4
         if (g_allocprof < 0) g_allocprof = getenv("DM_NVN_ALLOCPROF") != NULL;
         if (g_allocprof) { static uint64_t last; static int prev = -1; uint64_t now = g_dev.currentAllocatedSize; if (prev >= 0 && prev < 64 && now > last) g_ap_bytes[prev] += now - last; last = now; prev = h.op; }
