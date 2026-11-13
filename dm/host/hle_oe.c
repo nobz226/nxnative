@@ -242,6 +242,8 @@ void dm_oe_execute(int index, const void *param, size_t n) {
     dm_host_shutdown_then("oe::ExecuteProgram", have ? prog_exec : NULL, &P);
     for (;;) pause();   // another thread is ending the host
 }
+void dm_host_relaunch(void);
+HLE_FORCE("_ZN2nn2oe28RequestToRelaunchApplicationEv", "end this application and start it again (on the Mac: the graceful exit's steps, then an execv of the host, hle_lifecycle.c); never returns", void, h_oe_Relaunch, void) { dm_host_relaunch(); }
 HLE_FORCE("_ZN2nn2oe14ExecuteProgramEiPKvm", "end this program and start another of the application (DM_PROGRAMS on the Mac); never returns", void, h_oe_ExecProgram, int index, const void *param, size_t n) { dm_oe_execute(index, param, n); }
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "video recording switch; the host has no system recording", void, h_oe_DisableRec, void) {}
 // Silence the game's sound in system video captures (through am; FINAL FANTASY RESONANCE imports both): the host records nothing
