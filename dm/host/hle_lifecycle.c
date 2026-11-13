@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 #include <signal.h>
 #include <unistd.h>
+#include <errno.h>
 void hlecount_flush(void); void dm_rec_finish(void);
 void dm_host_shutdown(const char *why) {
     static _Atomic int once; if (atomic_exchange(&once, 1)) return;
@@ -18,6 +19,29 @@ void dm_host_shutdown(const char *why) {
     dm_audio_suspend(1);
     dm_gfx_suspend(1);
     LOG("graceful exit done (%.3f s)", (now_ns() - t0) / 1e9);
+    _exit(0);
+}
+// oe::RequestToRelaunchApplication (Super Smash Bros. Ultimate after Options > Language > Yes, which has saved the new language): on Horizon the application ends and starts
+// again from its first program. Here: the graceful exit's steps, then execv of this host with its own arguments and environment, so the launcher that waits for it sees one run
+// go on and the game boots afresh (the same process, a new window). If execv fails, the graceful exit's _exit(0)
+#include <crt_externs.h>
+#include <mach-o/dyld.h>
+void dm_host_relaunch(void) {
+    static _Atomic int once; if (atomic_exchange(&once, 1)) return;
+    uint64_t t0 = now_ns(); LOG("oe::RequestToRelaunchApplication: restarting the host");
+    hlecount_flush();
+    dm_rec_finish();
+    dm_cheats_exit();
+    dm_audio_suspend(1);
+    dm_gfx_suspend(1);
+    char path[4096]; uint32_t n = sizeof path;
+    char **argv = *_NSGetArgv();
+    if (_NSGetExecutablePath(path, &n) == 0 && argv && argv[0]) {
+        LOG("relaunch: execv %s (%.3f s after the request)", path, (now_ns() - t0) / 1e9);
+        fflush(stdout); fflush(stderr);
+        execv(path, argv);
+        LOG("[RED] relaunch: execv failed (errno %d): exiting instead", errno);
+    } else LOG("[RED] relaunch: no executable path or arguments: exiting instead");
     _exit(0);
 }
 void dm_term_install(void) {
