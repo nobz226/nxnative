@@ -24,3 +24,7 @@ The host makes the movie audio stream's pending buffer 16 KB (`dm/host/probe.c`,
 - `7696239e` oe: SwitchLcdBacklightOff / On answered on the host (crash backing out of menus).
 - `98a5fe5e` capture services (caps:*) served (PR #495, crash entering Spirits matches).
 - `fe4c08c1` a command memory callback with no allocator is treated as absent (crash leaving the Spirits map).
+
+## Language change restart (2026-11-13)
+
+Options > Language > Yes calls `nn::oe::RequestToRelaunchApplication`, which crashed the host (sdk+0x804c8). Fixed in our own small way in this branch (`ec129978`) and on Nobz main (`9d3dfae8`): `hle_oe.c` hooks the call and `dm_host_relaunch()` in `hle_lifecycle.c` runs the graceful exit's steps, then `execv`s the host with its own arguments, so the game boots again with the new language. User-confirmed. A host-only rebuild of this branch keeps it (`make -C dm/host GAME=01006A800016E000 dmhost`). When this branch takes upstream's `4ce1449f` (its own relaunch, on newer program-plan code), drop ours: both hook the same symbol.
