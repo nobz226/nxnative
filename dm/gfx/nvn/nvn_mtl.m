@@ -386,6 +386,11 @@ static void udc_selftest(void) {
 }
 void mtl_init(void) {
     if (g_dev) return;
+    {   // Breath of the Wild's terrain water pixel shaders read the colour target they draw into: read directly, the shallow water near a
+        // waterfall showed the ground with no water over it in hard-edged tile shapes, so they always get the snapshot (DM_NVN_FB_COPY)
+        if ([[[NSBundle mainBundle] objectForInfoDictionaryKey:@"DMTitleID"] isEqual:@"01007EF00011E000"] && !getenv("DM_NVN_FB_COPY"))
+            setenv("DM_NVN_FB_COPY", "753d0169ae3ce4f0,31c62448f42d361d,88cf0dcb8874e8ca,78d088a3a6ef81b5,10a2f6e14686360a", 1);
+    }
     {   // DM_BOTW_FOOTPRINTS (settings window, Breath of the Wild): 1 deep footprints drawn, only their shader reading a snapshot; 0 they are not drawn, no snapshots (coolest)
         const char *fp = getenv("DM_BOTW_FOOTPRINTS");
         if (fp && !strcmp(fp, "1")) { setenv("DM_NVN_FB_NODEPTH", "all", 1); setenv("DM_NVN_FB_STICKY", "f0e9530d6b9b759c", 1);
@@ -8732,7 +8737,7 @@ static void fb_prepare(NvProg *pr) {
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
     if (!pr || !pr->sh[1] || !R.rt.n || g_fz.active || g_defer_replaying || !fb_mode()) return;
     NvShader *fs = pr->sh[1];
-    if (fb_key_in("DM_NVN_FB_SKIP", fs->key)) return;
+    if (fb_key_in("DM_NVN_FB_SKIP", fs->key) && !fb_key_in("DM_NVN_FB_COPY", fs->key)) return;   // DM_NVN_FB_COPY=<keys>: these always get the snapshot, over DM_NVN_FB_SKIP ("all" included)
     { static char last[17]; g_fb_sticky_now = fb_key_in("DM_NVN_FB_STICKY", fs->key) && !strncmp(last, fs->key, 16); strlcpy(last, fs->key, sizeof last); }   // only draws following a draw of the same shader: a run of decals shares its first copy
     fb_pass_sync();
     uint32_t wm = 0;   // the attachments this draw writes
