@@ -386,10 +386,10 @@ static void udc_selftest(void) {
 }
 void mtl_init(void) {
     if (g_dev) return;
-    {   // Breath of the Wild's terrain water pixel shaders read the colour target they draw into: read directly, the shallow water near a
-        // waterfall showed the ground with no water over it in hard-edged tile shapes, so they always get the snapshot (DM_NVN_FB_COPY)
+    {   // Breath of the Wild: two uking_mat pixel shaders (var1785, var3033) read the colour target they draw into; read directly, shallow
+        // water near a waterfall showed the ground with no water over it in hard-edged shapes, so they always get the snapshot (DM_NVN_FB_COPY)
         if ([[[NSBundle mainBundle] objectForInfoDictionaryKey:@"DMTitleID"] isEqual:@"01007EF00011E000"] && !getenv("DM_NVN_FB_COPY"))
-            setenv("DM_NVN_FB_COPY", "753d0169ae3ce4f0,31c62448f42d361d,88cf0dcb8874e8ca,78d088a3a6ef81b5,10a2f6e14686360a", 1);
+            setenv("DM_NVN_FB_COPY", "b2f5ae9ef79011b9,9a39125242fe6572", 1);
     }
     {   // DM_BOTW_FOOTPRINTS (settings window, Breath of the Wild): 1 deep footprints drawn, only their shader reading a snapshot; 0 they are not drawn, no snapshots (coolest)
         const char *fp = getenv("DM_BOTW_FOOTPRINTS");
