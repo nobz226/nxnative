@@ -9414,7 +9414,13 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     { int cu = S.poly.cull == NVN_FACE_FRONT ? MTLCullModeFront : S.poly.cull == NVN_FACE_BACK ? MTLCullModeBack : MTLCullModeNone;
       int wi = (S.poly.front == NVN_FRONT_FACE_CCW) != g_queue_origin_ll ? MTLWindingCounterClockwise : MTLWindingClockwise;   // NVN's raster flip is captured when the queue is initialized, rather than when the device origin changes.
       int fi = S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
-      float bi[3] = {0, 0, 0}; if (S.poly.offset_en & 4) { bi[0] = S.po.units; bi[1] = S.po.factor; bi[2] = S.po.clamp; }
+      int own_bias = (S.poly.offset_en & 4) != 0;
+      float bi[3] = {0, 0, 0}; if (own_bias) { bi[0] = S.po.units; bi[1] = S.po.factor; bi[2] = S.po.clamp; }
+      // Depth on the far plane (upstream 04ba572d, PR #2199), a workaround for Apple's rasterizer: a vertex shader with z = w puts every vertex at the viewport's far value; NVIDIA
+      // fills such a triangle with exactly that value, Apple's GPU gives many pixels a depth up to 2^-23 short of it, and two layers drawn there fight (Mario Kart 8 Deluxe's
+      // Sky-High Sundae: red blocks of the sunset panorama through the blue dome). A bias of 16 units past the far value with depth clamping puts every pixel on it. Only a far
+      // value above the near one; a draw with the game's own polygon offset keeps it; a geometry or tessellation stage writes its own position
+      if (pr && pr->sh[0] && pr->sh[0]->rf.pos_far && !pr->sh[2] && !pr->sh[3] && !pr->sh[4] && !own_bias && (S.has_vp ? S.dr[1] > S.dr[0] : 1)) { bi[0] = 16; cl = 0; }
       if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
       if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
       if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
