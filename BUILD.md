@@ -15,3 +15,7 @@ Full build (this script has no --work-dir: the work folder is <input>/0100DCA006
     export PATH="/Applications/NX2Apple.app/Contents/Resources/tools/bin:$PATH" DOTNET_ROOT=~/.dotnet PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
     /Applications/NX2Apple.app/Contents/Resources/python/bin/python3.13 scripts/build_ipa_from_nsp.py <input folder> \
       -k /Volumes/extSSD/Games/NXNative/system/keys.0/prod.keys --platform mac-app --progress lines -o ../0100DCA0064A6000.app
+
+## Ghost Gallery fix (2026-11-24)
+
+`dm/games/0100DCA0064A6000/patches.py` (CUTS on main 79e5950f…): the gallery camera's bone lookup (main+0x472334) skips a bone whose skeleton handle slot is free (odd value) or whose hash is not found, instead of crashing (seedds/nxnative #672). Applied to the installed app by hand (main.patched.bin, re-signed); the copy from before is `../main.patched.bin.before-gallery-fix`, undone by `../Revert Ghost Gallery fix.command`. A full build applies it through the rewriter.
