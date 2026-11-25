@@ -23,3 +23,10 @@ CUTS = {
      'Ghost Gallery (#672): mov w28, #-1 -> b main+0x472670 (bone hash not found or empty slot: skip the bone instead of reading index -1)'),
   ],
 }
+
+BINDING = [
+    {'what': 'Ghost Gallery camera: a bone whose skeleton handle slot is free, or whose hash is not found, is skipped (#672)', 'now': 'build', 'goal': 'game', 'purpose': 'runtime',
+     'why': "the game's own gallery camera code, which a function fingerprint (MATCH_CUTS) could find in another update",
+     'blocked': "the profile packs only 1.4.0's main, the one build on hand",
+     'checked': 'main 1.4.0 (v327680): the cut function and the handle table writers and free routine read by disassembly; a completed-game save on an M2 MacBook Air, the Ghost Gallery opened and its sections switched quickly with D-pad Up, no crash (2026-11-24)'},
+]
